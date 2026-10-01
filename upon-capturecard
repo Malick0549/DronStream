@@ -1,0 +1,135 @@
+Assume the capture card is plugged in. Do only these steps.
+
+---
+
+## Step 1 — Get the device name
+
+In PowerShell:
+
+```powershell
+ffmpeg -list_devices true -f dshow -i dummy
+```
+
+Find the **video** device name (example: `USB Video`).  
+You will paste that exact name in Step 3.
+
+---
+
+## Step 2 — File: `backend/app/streaming/input_source.py`
+
+Open that file. Find `_start_ffmpeg`.
+
+**Find this whole block:**
+
+```python
+        command = [
+            FFMPEG_PATH,
+
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+
+            # Loop the development file forever.
+            "-stream_loop",
+            "-1",
+
+            "-re",
+
+            "-i",
+            self.input_source,
+
+            # Force the format expected by the WebRTC track.
+            "-vf",
+            f"scale={self.width}:{self.height}",
+
+            "-pix_fmt",
+            "yuv420p",
+
+            "-f",
+            "rawvideo",
+
+            "pipe:1",
+        ]
+```
+
+**Delete it and put this instead:**
+
+```python
+        command = [
+            FFMPEG_PATH,
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-f", "dshow",
+            "-rtbufsize", "100M",
+            "-i", f"video={self.input_source}",
+            "-vf", f"scale={self.width}:{self.height}",
+            "-pix_fmt", "yuv420p",
+            "-f", "rawvideo",
+            "pipe:1",
+        ]
+```
+
+---
+
+## Step 3 — File: `backend/app/streaming/manager.py`
+
+Open that file. Find the `start` function.
+
+**Find:**
+
+```python
+        from backend.app.streaming.input_source import (
+            VIDEO_FILE,
+        )
+
+        try:
+
+            self.source = FFmpegVideoSource(
+                input_source=VIDEO_FILE,
+                width=1280,
+                height=720,
+                fps=30,
+            )
+```
+
+**Replace with:**
+
+```python
+        try:
+
+            self.source = FFmpegVideoSource(
+                input_source="USB Video",  # ← put YOUR device name here
+                width=1280,
+                height=720,
+                fps=30,
+            )
+```
+
+Change `"USB Video"` to the exact name from Step 1.
+
+---
+
+## Step 4 — Run
+
+1. Save both files  
+2. Restart the API  
+3. Start stream  
+
+You should see the capture card video on the dashboard and viewer.
+
+---
+
+**Only two files:**  
+1. `input_source.py` → FFmpeg command for the card  
+2. `manager.py` → device name string
+
+
+
+B) Capture card mode (USE_CAPTURE_CARD = True)
+
+List devices:
+PowerShell
+ffmpeg -list_devices true -f dshow -i dummy
+Copy the exact video name into DEVICE_NAME.
+Set:PythonUSE_CAPTURE_CARD = True
+DEVICE_NAME = "Your Exact Device Name"

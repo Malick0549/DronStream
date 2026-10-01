@@ -1,0 +1,13 @@
+﻿.venv/
+__pycache__/
+*.pyc
+.env
+backend/.env
+node_modules/
+frontend/dist/
+*.pyd
+.DS_Store
+streaming/recordings/saved/
+backend/recordings/
+backend/screenshots/
+*.log
