@@ -1,5 +1,8 @@
 import asyncio
+from pathlib import Path
+from dotenv import load_dotenv
 
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 from backend.app.database import Base, engine
 
 from backend.app.models import (

@@ -4,12 +4,17 @@ import hmac
 import secrets
 
 
-# Development admin account
-ADMIN_USERNAME = "admin"
+import os
 
-# This is a temporary development password.
-# We will move this to environment variables/database later.
-ADMIN_PASSWORD = "DroneStream@123"
+# Development admin account
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+
+if not ADMIN_PASSWORD:
+    raise RuntimeError(
+        "ADMIN_PASSWORD environment variable is not set."
+    )
 
 
 # Store active login sessions in memory for now.

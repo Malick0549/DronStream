@@ -9,10 +9,12 @@ from sqlalchemy.orm import DeclarativeBase
 
 
 # PostgreSQL connection settings
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:DroneStream%402026@localhost:5432/dronestream",
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL environment variable is not set."
+    )
 
 
 # Database engine
