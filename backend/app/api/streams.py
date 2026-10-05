@@ -7,6 +7,7 @@ from sqlalchemy import select, func
 from backend.app.auth.dependencies import get_current_admin
 from backend.app.database import AsyncSessionLocal
 from backend.app.models import Stream, StreamLink, ViewerSession
+from backend.app.models.account import StreamOwnership
 from backend.app.streaming.manager import stream_manager
 
 
@@ -68,6 +69,11 @@ async def get_latest_stream(session):
 
     result = await session.execute(
         select(Stream)
+        .where(
+            ~select(StreamOwnership.id)
+            .where(StreamOwnership.stream_id == Stream.id)
+            .exists()
+        )
         .order_by(Stream.created_at.desc())
         .limit(1)
     )
@@ -222,6 +228,7 @@ async def start_stream(
                 width=w,
                 height=h,
             )
+            stream_manager.bind_existing_source(str(stream.id))
         except Exception as error:
             return {
                 "success": False,
@@ -382,6 +389,7 @@ async def stop_stream(
             except Exception as stop_err:
                 print("DroneStream: failed to stop recording on stream stop:", stop_err)
 
+        await stream_manager.stop_stream(str(stream.id))
         await stream_manager.stop()
 
         try:

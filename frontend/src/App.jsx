@@ -1,4 +1,6 @@
 import AuthGate from "./components/AuthGate";
+import BroadcasterPage from "./pages/BroadcasterPage";
+import BroadcastersAdminPage from "./pages/BroadcastersAdminPage";
 import React from "react";
 import { useEffect, useState } from "react";
 
@@ -173,6 +175,16 @@ return ( <nav className="admin-navigation">
   >
     <span>⚙</span>
     Settings
+  </button>
+
+  <button
+    className={`admin-nav-link ${
+      currentPage === "broadcasters" ? "active" : ""
+    }`}
+    onClick={() => navigate("/admin/broadcasters")}
+  >
+    <span>◎</span>
+    Broadcasters
   </button>
 
   <button
@@ -1489,7 +1501,7 @@ return ( <div className="app">
           <span>
 
             <strong>
-              Start Stream
+              Go Live
             </strong>
 
             <small>
@@ -1672,6 +1684,49 @@ return ( <div className="app">
           >
             Open Viewer
           </button>
+
+          <div className="admin-viewer-share-actions">
+            <button
+              onClick={() => navigator.clipboard.writeText(viewerLink).then(() => setMessage("Viewer link copied."))}
+            >
+              Copy
+            </button>
+            <a
+              href={`https://wa.me/?text=${encodeURIComponent(viewerLink)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              WhatsApp
+            </a>
+            <a
+              href={`https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(viewerLink)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Facebook
+            </a>
+            <a
+              href={`https://t.me/share/url?url=${encodeURIComponent(viewerLink)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Telegram
+            </a>
+            <a
+              href={`https://twitter.com/intent/tweet?url=${encodeURIComponent(viewerLink)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              X
+            </a>
+            {navigator.share && (
+              <button
+                onClick={() => navigator.share({ title: "DroneStream live feed", url: viewerLink }).catch(() => {})}
+              >
+                More
+              </button>
+            )}
+          </div>
 
         </div>
 
@@ -5240,17 +5295,13 @@ async function connectToStream() {
     // 2. Create WebRTC connection
     // ----------------------------------------------------
 
-    const isLocalHost =
-      window.location.hostname === "localhost" ||
-      window.location.hostname === "127.0.0.1";
-
+    const iceConfigResponse = await fetch(`${API_URL}/api/webrtc/ice-config`);
+    if (!iceConfigResponse.ok) {
+      throw new Error("Unable to load WebRTC network configuration.");
+    }
+    const iceConfig = await iceConfigResponse.json();
     peerConnection = new RTCPeerConnection({
-      iceServers: isLocalHost
-        ? []
-        : [
-            { urls: "stun:stun.l.google.com:19302" },
-            { urls: "stun:stun1.l.google.com:19302" },
-          ],
+      iceServers: iceConfig.iceServers || [],
       iceTransportPolicy: "all",
     });
 
@@ -5423,6 +5474,7 @@ async function connectToStream() {
 
           body: JSON.stringify({
             viewer_token: token,
+            viewer_session_id: accessData.session_id,
 
             sdp:
               peerConnection
@@ -6360,6 +6412,10 @@ window.scrollTo({
 // Viewer route
 // ----------------------------------------------------------
 
+if (path === "/broadcast") {
+  return <BroadcasterPage />;
+}
+
 if (
 path.startsWith("/watch/")
 ) {
@@ -6439,6 +6495,14 @@ if (path === "/admin/settings") {
   return (
     <AuthGate>
       <SettingsPage navigate={navigate} />
+    </AuthGate>
+  );
+}
+
+if (path === "/admin/broadcasters") {
+  return (
+    <AuthGate>
+      <BroadcastersAdminPage navigate={navigate} />
     </AuthGate>
   );
 }

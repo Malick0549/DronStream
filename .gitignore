@@ -3,6 +3,10 @@ __pycache__/
 *.pyc
 .env
 backend/.env
+*.db
+*.sqlite
+*.sqlite3
+.local-admin-credentials.txt
 node_modules/
 frontend/dist/
 *.pyd

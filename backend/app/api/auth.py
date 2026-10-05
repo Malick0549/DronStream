@@ -7,6 +7,7 @@ from backend.app.auth.security import (
     validate_admin_session,
     delete_admin_session,
 )
+from backend.app.config import settings
 
 
 router = APIRouter(
@@ -39,7 +40,7 @@ async def admin_login(credentials: LoginRequest, response: Response):
         key="drone_admin_session",
         value=session_token,
         httponly=True,
-        secure=False,  # True when deployed with HTTPS
+        secure=str(settings.environment).lower() not in {"development", "dev"},
         samesite="lax",
         max_age=8 * 60 * 60,
     )

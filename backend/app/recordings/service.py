@@ -341,3 +341,13 @@ class RecordingService:
 
 
 recording_service = RecordingService()
+
+_stream_recording_services: dict[int, RecordingService] = {}
+
+
+def get_stream_recording_service(stream_id: int) -> RecordingService:
+    service = _stream_recording_services.get(stream_id)
+    if service is None:
+        service = RecordingService()
+        _stream_recording_services[stream_id] = service
+    return service

@@ -16,6 +16,9 @@ from backend.app.api.viewer import router as viewer_router
 from backend.app.api.admin import router as admin_router
 from backend.app.api.webrtc import router as webrtc_router
 from backend.app.api.auth import router as auth_router
+from backend.app.api.accounts import router as accounts_router
+from backend.app.api.accounts import admin_router as broadcaster_admin_router
+from backend.app.config import settings
 from sqlalchemy import text
 from backend.app.database import AsyncSessionLocal
 
@@ -27,10 +30,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,6 +41,8 @@ app.include_router(viewer_router)
 app.include_router(admin_router)
 app.include_router(webrtc_router)
 app.include_router(auth_router)
+app.include_router(accounts_router)
+app.include_router(broadcaster_admin_router)
 
 
 @app.get("/")

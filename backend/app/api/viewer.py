@@ -30,6 +30,7 @@ from backend.app.screenshots.service import (
 )
 from backend.app.recordings.service import (
     recording_service,
+    get_stream_recording_service,
 )
 
 router = APIRouter(
@@ -826,7 +827,8 @@ async def viewer_capture_screenshot(
         # 5. Make sure the stream source is running.
         # ---------------------------------------------------------
 
-        if not stream_manager.is_running:
+        stream_key = str(stream.id)
+        if not stream_manager.has_stream_source(stream_key):
             return {
                 "success": False,
                 "message": "The stream source is not running.",
@@ -840,10 +842,9 @@ async def viewer_capture_screenshot(
 
         try:
 
-            screenshot_subscription = (
-                stream_manager.relay.subscribe(
-                    stream_manager.source.video
-                )
+            screenshot_subscription = stream_manager.subscribe_stream_source(
+                stream_key,
+                buffered=False,
             )
 
             screenshot = (
@@ -1057,13 +1058,19 @@ async def viewer_start_recording(
         #    other recording is already active.
         # ---------------------------------------------------------
 
-        if not stream_manager.is_running:
+        stream_key = str(stream.id)
+        if not stream_manager.has_stream_source(stream_key):
             return {
                 "success": False,
                 "message": "The stream source is not running.",
             }
 
-        if recording_service.is_recording:
+        active_recorder = (
+            get_stream_recording_service(stream.id)
+            if stream_manager.uses_browser_publisher(stream_key)
+            else recording_service
+        )
+        if active_recorder.is_recording:
             return {
                 "success": False,
                 "message": "A recording is already in progress.",
@@ -1075,11 +1082,9 @@ async def viewer_start_recording(
 
         try:
 
-            source_track = (
-                stream_manager.subscribe_recording()
-            )
+            source_track = stream_manager.subscribe_recording(stream_key)
 
-            recording = recording_service.start(
+            recording = active_recorder.start(
                 stream_id=stream.id,
                 source_track=source_track,
                 viewer_session_id=viewer_session.id,
@@ -1163,7 +1168,14 @@ async def viewer_stop_recording(
         # 2. Make sure a recording is active.
         # ---------------------------------------------------------
 
-        if not recording_service.is_recording:
+        active_recorder = (
+            get_stream_recording_service(viewer_session.stream_id)
+            if stream_manager.uses_browser_publisher(
+                str(viewer_session.stream_id)
+            )
+            else recording_service
+        )
+        if not active_recorder.is_recording:
             return {
                 "success": False,
                 "message": "No recording is currently active.",
@@ -1174,7 +1186,7 @@ async def viewer_stop_recording(
         #    may stop it.
         # ---------------------------------------------------------
 
-        active = recording_service.active_recording
+        active = active_recorder.active_recording
 
         if (
             active is None
@@ -1195,7 +1207,7 @@ async def viewer_stop_recording(
 
         try:
 
-            recording = await recording_service.stop()
+            recording = await active_recorder.stop()
 
         except Exception as error:
 

@@ -9,6 +9,12 @@ from backend.app.models.screenshot_permission import (
 from backend.app.models.settings import PlatformSettings
 from backend.app.models.security_log import SecurityLog
 from backend.app.models.admin import Admin
+from backend.app.models.account import (
+    BroadcasterAccount,
+    BroadcasterInvite,
+    BroadcasterSession,
+    StreamOwnership,
+)
 from backend.app.models.stream import Stream
 from backend.app.models.viewer import (
     StreamLink,
@@ -18,6 +24,10 @@ from backend.app.models.viewer import (
 
 __all__ = [
     "Admin",
+    "BroadcasterAccount",
+    "BroadcasterInvite",
+    "BroadcasterSession",
+    "StreamOwnership",
     "Screenshot",
     "Stream",
     "StreamLink",

@@ -1,10 +1,12 @@
 import os
+import shutil
 import subprocess
 import threading
 import time
 from fractions import Fraction
 
 import av
+import numpy as np
 
 from aiortc import VideoStreamTrack
 
@@ -21,10 +23,15 @@ VIDEO_FILE = os.path.abspath(
 )
 
 
+_configured_ffmpeg = os.environ.get("FFMPEG_PATH")
 FFMPEG_PATH = (
-    r"C:\Users\ABDUL MALIK\AppData\Local\Microsoft\WinGet\Packages"
-    r"\Gyan.FFmpeg.Shared_Microsoft.Winget.Source_8wekyb3d8bbwe"
-    r"\ffmpeg-9.0.1-full_build-shared\bin\ffmpeg.exe"
+    shutil.which(_configured_ffmpeg) if _configured_ffmpeg else None
+) or (
+    _configured_ffmpeg if _configured_ffmpeg and os.path.isfile(_configured_ffmpeg) else None
+) or shutil.which("ffmpeg") or (
+        r"C:\Users\ABDUL MALIK\AppData\Local\Microsoft\WinGet\Packages"
+        r"\Gyan.FFmpeg.Shared_Microsoft.Winget.Source_8wekyb3d8bbwe"
+        r"\ffmpeg-9.0.1-full_build-shared\bin\ffmpeg.exe"
 )
 
 DEFAULT_WIDTH = 1280
@@ -115,12 +122,27 @@ class FFmpegVideoTrack(VideoStreamTrack):
             ]
         else:
             # Capture card / webcam (Windows DirectShow)
+            #
+            # -framerate / -video_size / -vcodec mjpeg are required.
+            # Without explicitly requesting the MJPEG mode, DirectShow
+            # falls back to this card's raw YUYV mode, which is
+            # hard-capped at 10 fps (confirmed via
+            # "ffmpeg -f dshow -list_options true" on this exact
+            # card) - that was the cause of the very slow feed.
+            capture_width, capture_height = (
+                (1920, 1080)
+                if self.width >= 1920
+                else (1280, 720)
+            )
             command = [
                 FFMPEG_PATH,
                 "-hide_banner",
                 "-loglevel", "warning",
                 "-f", "dshow",
                 "-rtbufsize", "100M",
+                "-framerate", str(self.fps),
+                "-video_size", f"{capture_width}x{capture_height}",
+                "-vcodec", "mjpeg",
                 "-i", f"video={self.input_source}",
                 "-vf", f"scale={self.width}:{self.height}",
                 "-pix_fmt", "yuv420p",
@@ -151,8 +173,37 @@ class FFmpegVideoTrack(VideoStreamTrack):
                 "FFmpeg did not provide a video output pipe."
             )
 
+        if self.process.stderr:
+            threading.Thread(
+                target=self._drain_stderr,
+                daemon=True,
+            ).start()
+
         print("DroneStream: FFmpeg input started.")
         print("=" * 70)
+
+    def _drain_stderr(self):
+        if not self.process or not self.process.stderr:
+            return
+
+        try:
+            for line in iter(self.process.stderr.readline, b""):
+                if self._closed:
+                    break
+
+                text = line.decode(
+                    "utf-8", errors="replace"
+                ).strip()
+
+                if text:
+                    print(f"DroneStream FFmpeg: {text}")
+
+        except Exception as error:
+            if not self._closed:
+                print(
+                    "DroneStream: FFmpeg stderr reader error:",
+                    repr(error),
+                )
 
     # --------------------------------------------------------------
     # Read exactly one video frame
@@ -205,39 +256,26 @@ class FFmpegVideoTrack(VideoStreamTrack):
                 "FFmpeg video track was closed."
             )
 
-        frame = av.VideoFrame(
-            width=self.width,
-            height=self.height,
+        # ----------------------------------------------------
+        # Build the YUV420P frame via numpy, letting PyAV
+        # handle plane strides correctly.
+        #
+        # Writing tightly-packed bytes straight into
+        # frame.planes[i].update() assumes each plane's
+        # line_size equals width exactly, which PyAV does not
+        # guarantee - that mismatch is what caused the
+        # horizontal color banding seen with the capture card.
+        # ----------------------------------------------------
+
+        frame_array = np.frombuffer(
+            frame_data, dtype=np.uint8
+        ).reshape(
+            (self.height * 3 // 2, self.width)
+        )
+
+        frame = av.VideoFrame.from_ndarray(
+            frame_array,
             format="yuv420p",
-        )
-
-        frame.planes[0].update(
-            frame_data[
-                : self.width * self.height
-            ]
-        )
-
-        uv_size = (
-            self.width
-            * self.height
-            // 4
-        )
-
-        y_size = (
-            self.width
-            * self.height
-        )
-
-        frame.planes[1].update(
-            frame_data[
-                y_size : y_size + uv_size
-            ]
-        )
-
-        frame.planes[2].update(
-            frame_data[
-                y_size + uv_size :
-            ]
         )
 
         self.frame_number += 1

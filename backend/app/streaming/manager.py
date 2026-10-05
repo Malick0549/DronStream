@@ -1,8 +1,22 @@
-from aiortc import RTCPeerConnection
+from aiortc import RTCPeerConnection, MediaStreamTrack
 from aiortc.contrib.media import MediaRelay
 
 from backend.app.streaming.input_source import FFmpegVideoSource
 
+
+
+class StreamMediaSession:
+    def __init__(
+        self,
+        source_track: MediaStreamTrack,
+        publisher: RTCPeerConnection | None = None,
+    ):
+        self.source_track = source_track
+        self.publisher = publisher
+        self.relay = MediaRelay()
+        self.peer_connections: set[RTCPeerConnection] = set()
+        if publisher is not None:
+            self.peer_connections.add(publisher)
 
 
 class StreamManager:
@@ -18,11 +32,36 @@ class StreamManager:
         self.relay = MediaRelay()
         self.peer_connections: set[RTCPeerConnection] = set()
         self.recording_subscription = None
+        self.stream_sessions: dict[str, StreamMediaSession] = {}
         
         
     @property
     def is_running(self) -> bool:
-        return self.source is not None
+        return self.source is not None or any(
+            session.source_track.readyState == "live"
+            for session in self.stream_sessions.values()
+        )
+
+    @property
+    def active_peer_count(self) -> int:
+        return len(self.peer_connections) + sum(
+            len(session.peer_connections)
+            for session in self.stream_sessions.values()
+        )
+
+    @property
+    def source_type(self) -> str:
+        if self.source is not None:
+            return "ffmpeg"
+        if any(
+            session.publisher is not None
+            and session.source_track.readyState == "live"
+            for session in self.stream_sessions.values()
+        ):
+            return "browser"
+        if self.is_running:
+            return "ffmpeg"
+        return "none"
 
     def start(
         self,
@@ -85,14 +124,25 @@ class StreamManager:
             )
 
         return self.relay.subscribe(
-            self.source.video
+            self.source.video,
+            buffered=False,
         )
         
-    def subscribe_recording(self):
+    def subscribe_recording(self, stream_key: str | None = None):
         """
         Give the recording system its own relay subscription
         to the shared FFmpeg source.
         """
+
+        if stream_key is not None and stream_key in self.stream_sessions:
+            stream_session = self.stream_sessions[stream_key]
+            if stream_session.source_track.readyState != "live":
+                raise RuntimeError("The stream media source is not running.")
+            self.recording_subscription = stream_session.relay.subscribe(
+                stream_session.source_track,
+                buffered=True,
+            )
+            return self.recording_subscription
 
         if self.source is None:
             raise RuntimeError(
@@ -107,6 +157,110 @@ class StreamManager:
         )
 
         return self.recording_subscription
+
+    def attach_publisher(
+        self,
+        stream_key: str,
+        source_track: MediaStreamTrack,
+        peer_connection: RTCPeerConnection,
+    ):
+        current = self.stream_sessions.get(stream_key)
+        if current is not None and current.source_track.readyState == "live":
+            raise RuntimeError("This stream already has a live publisher.")
+
+        self.stream_sessions[stream_key] = StreamMediaSession(
+            source_track=source_track,
+            publisher=peer_connection,
+        )
+
+    def bind_existing_source(self, stream_key: str):
+        if self.source is None or self.source.video is None:
+            raise RuntimeError("The server capture source is not running.")
+        self.stream_sessions[stream_key] = StreamMediaSession(
+            source_track=self.source.video,
+        )
+
+    def subscribe_stream(self, stream_key: str) -> MediaStreamTrack:
+        stream_session = self.stream_sessions.get(stream_key)
+        if (
+            stream_session is None
+            or stream_session.source_track.readyState != "live"
+        ):
+            raise RuntimeError("The stream does not have a live publisher.")
+
+        return stream_session.relay.subscribe(
+            stream_session.source_track,
+            buffered=False,
+        )
+
+    def has_stream_source(self, stream_key: str) -> bool:
+        stream_session = self.stream_sessions.get(stream_key)
+        if stream_session is not None:
+            return stream_session.source_track.readyState == "live"
+        return self.source is not None and self.source.video is not None
+
+    def uses_browser_publisher(self, stream_key: str) -> bool:
+        stream_session = self.stream_sessions.get(stream_key)
+        return stream_session is not None and stream_session.publisher is not None
+
+    def subscribe_stream_source(
+        self,
+        stream_key: str,
+        buffered: bool = False,
+    ) -> MediaStreamTrack:
+        stream_session = self.stream_sessions.get(stream_key)
+        if stream_session is not None:
+            if stream_session.source_track.readyState != "live":
+                raise RuntimeError("The stream media source is not running.")
+            return stream_session.relay.subscribe(
+                stream_session.source_track,
+                buffered=buffered,
+            )
+        if self.source is None or self.source.video is None:
+            raise RuntimeError("The stream media source is not running.")
+        return self.relay.subscribe(self.source.video, buffered=buffered)
+
+    def register_stream_peer(
+        self,
+        stream_key: str,
+        peer_connection: RTCPeerConnection,
+    ):
+        stream_session = self.stream_sessions.get(stream_key)
+        if stream_session is None:
+            raise RuntimeError("The stream media session does not exist.")
+        stream_session.peer_connections.add(peer_connection)
+
+    def unregister_stream_peer(
+        self,
+        stream_key: str,
+        peer_connection: RTCPeerConnection,
+    ):
+        stream_session = self.stream_sessions.get(stream_key)
+        if stream_session is not None:
+            stream_session.peer_connections.discard(peer_connection)
+
+    async def stop_stream(self, stream_key: str):
+        stream_session = self.stream_sessions.pop(stream_key, None)
+        if stream_session is None:
+            return
+
+        for peer_connection in list(stream_session.peer_connections):
+            try:
+                await peer_connection.close()
+            except Exception as error:
+                print(
+                    "DroneStream: Error closing stream peer:",
+                    repr(error),
+                )
+
+        if stream_session.publisher is not None:
+            try:
+                stream_session.source_track.stop()
+            except Exception as error:
+                print(
+                    "DroneStream: Error stopping stream track:",
+                    repr(error),
+                )
 
     def register_peer(
         self,

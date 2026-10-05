@@ -1,0 +1,227 @@
+.broadcasters-admin {
+  min-height: 100vh;
+  color: #eef1f5;
+  background: #0a0d12;
+  font-family: "Aptos", "Segoe UI", sans-serif;
+}
+
+.broadcasters-admin-header {
+  min-height: 64px;
+  padding: 12px clamp(16px, 4vw, 44px);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #252c35;
+  background: #10151b;
+}
+
+.broadcasters-admin-header button,
+.broadcaster-invite-result button {
+  border: 0;
+  color: #b7c7d9;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.broadcasters-admin-header span,
+.broadcasters-admin-title p {
+  color: #8298ad;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+}
+
+.broadcasters-admin-content {
+  width: min(1240px, 100%);
+  margin: 0 auto;
+  padding: clamp(24px, 5vw, 56px) clamp(16px, 4vw, 42px);
+}
+
+.broadcasters-admin-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  margin-bottom: 24px;
+}
+
+.broadcasters-admin-title p {
+  margin: 0 0 8px;
+}
+
+.broadcasters-admin-title h1 {
+  margin: 0;
+  font-size: 30px;
+  letter-spacing: 0;
+}
+
+.broadcasters-admin-title > span {
+  color: #9ca8b7;
+  font-size: 12px;
+}
+
+.broadcaster-invite-form,
+.broadcaster-invite-result {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  padding: 16px 0;
+  border-top: 1px solid #252c35;
+  border-bottom: 1px solid #252c35;
+}
+
+.broadcaster-invite-form > div {
+  display: grid;
+  gap: 7px;
+}
+
+.broadcaster-invite-form label {
+  color: #b4bfcc;
+  font-size: 11px;
+}
+
+.broadcaster-invite-form select {
+  min-width: 150px;
+  height: 38px;
+  border: 1px solid #39434e;
+  border-radius: 3px;
+  padding: 0 9px;
+  color: #e7ebf0;
+  background: #11171d;
+}
+
+.broadcaster-invite-form button {
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid #81bb92;
+  border-radius: 3px;
+  color: #08130b;
+  background: #84d195;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.broadcaster-invite-result {
+  justify-content: space-between;
+  align-items: center;
+  border-top: 0;
+}
+
+.broadcaster-invite-result a {
+  overflow-wrap: anywhere;
+  color: #92c9a0;
+  font-size: 12px;
+}
+
+.broadcaster-admin-message,
+.broadcaster-admin-error {
+  font-size: 12px;
+}
+
+.broadcaster-admin-message { color: #85d69a; }
+.broadcaster-admin-error { color: #f29991; }
+
+.broadcasters-table-wrap {
+  overflow-x: auto;
+  margin-top: 22px;
+  border: 1px solid #252c35;
+}
+
+.broadcasters-table {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+}
+
+.broadcasters-table th,
+.broadcasters-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid #252c35;
+  text-align: left;
+  font-size: 12px;
+}
+
+.broadcasters-table th {
+  color: #95a5b6;
+  background: #11171d;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.broadcasters-table td { color: #d8dfe7; }
+.broadcasters-table tr:last-child td { border-bottom: 0; }
+
+.account-state {
+  padding: 4px 8px;
+  border: 1px solid #426c4b;
+  border-radius: 3px;
+  color: #a6e1b0;
+  background: #15271a;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+}
+
+.account-state.disabled {
+  border-color: #714743;
+  color: #e8a29a;
+  background: #291916;
+}
+
+.permission-toggle {
+  position: relative;
+  display: inline-flex;
+  width: 34px;
+  height: 19px;
+  cursor: pointer;
+}
+
+.permission-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.permission-toggle span {
+  width: 34px;
+  height: 19px;
+  border: 1px solid #525d68;
+  border-radius: 10px;
+  background: #262e36;
+}
+
+.permission-toggle span::after {
+  content: "";
+  display: block;
+  width: 13px;
+  height: 13px;
+  margin: 2px;
+  border-radius: 50%;
+  background: #a6b0ba;
+  transition: transform 120ms ease;
+}
+
+.permission-toggle input:checked + span {
+  border-color: #477651;
+  background: #1d4629;
+}
+
+.permission-toggle input:checked + span::after {
+  background: #8bd99b;
+  transform: translateX(15px);
+}
+
+.permission-toggle input:focus-visible + span { outline: 2px solid #84d195; }
+.permission-toggle input:disabled + span { opacity: 0.4; }
+.empty-broadcasters { color: #919daa !important; text-align: center !important; }
+
+@media (max-width: 620px) {
+  .broadcasters-admin-title h1 { font-size: 25px; }
+  .broadcaster-invite-form { align-items: stretch; flex-direction: column; }
+  .broadcaster-invite-form select,
+  .broadcaster-invite-form button { width: 100%; }
+}

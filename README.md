@@ -99,6 +99,10 @@ Never commit a real database password or other production secrets to GitHub.
 
 Local Development
 
+Windows quick start: double-click `Start-DroneStream.bat`. On a fresh Windows 10/11 PC, it uses Winget to install Python, Node.js, and FFmpeg if missing, creates a local Python environment and SQLite database, installs app dependencies, generates a private admin login, initializes tables, and starts the site. Internet access and Windows package-install approval may be required on first run. Later runs reuse the installed environment and data. It opens the dashboard at `http://localhost:5173/` and is local-machine only; it does not expose the site to other devices or the public internet.
+
+To move the current source to another PC, double-click `Prepare-DroneStream-Transfer.bat` and copy the ZIP to the destination. The ZIP excludes `.env`, Python/Node dependencies, local database data, and saved recordings/screenshots; first run sets these up automatically. Existing accounts and media are not migrated. See [HOME-HOSTING.md](HOME-HOSTING.md) for the optional Windows + VirtualBox Ubuntu route to remote access; it requires public IPv4, free dynamic DNS, and router port forwarding.
+
 Backend
 
 Activate the virtual environment:
@@ -171,6 +175,8 @@ For production, use HTTPS, secure cookies, strong secret management, password ha
 Production Deployment
 
 DroneStream is more demanding than a normal CRUD application because it contains a real-time WebRTC media path and a physical video-ingest requirement.
+
+The current staging stack and its VPS, TLS, persistent-storage, and TURN setup are documented in [DEPLOYMENT.md](DEPLOYMENT.md). Broadcasters can capture a device connected to their own browser over HTTPS; authorized viewers receive the relayed stream through share links. The legacy server-attached FFmpeg capture path remains available for local operation.
 
 Recommended final architecture
 

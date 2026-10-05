@@ -1,5 +1,6 @@
 # backend/app/config.py
 from functools import lru_cache
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +26,10 @@ class Settings(BaseSettings):
 
     # --- Environment ---
     environment: str = "development"
+    force_loopback: bool = True
+    turn_urls: list[str] = Field(default_factory=list)
+    turn_shared_secret: str = ""
+    turn_credential_ttl_seconds: int = 3600
 
     # --- CORS ---
     cors_origins: list[str] = [

@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy import event
 from sqlalchemy.orm import DeclarativeBase
 
 
@@ -23,6 +24,13 @@ engine = create_async_engine(
     echo=False,
     pool_pre_ping=True,
 )
+
+if DATABASE_URL.startswith("sqlite+"):
+    @event.listens_for(engine.sync_engine, "connect")
+    def _enable_sqlite_foreign_keys(connection, _record):
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 # Session factory

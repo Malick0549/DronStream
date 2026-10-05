@@ -1,6 +1,6 @@
 import re
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from aiortc import (
@@ -12,13 +12,22 @@ from aiortc import (
 
 from backend.app.api.streams import stream_state
 from backend.app.streaming.manager import stream_manager
+from backend.app.auth.dependencies import get_current_broadcaster
+from backend.app.database import AsyncSessionLocal
+from backend.app.models.account import BroadcasterAccount, StreamOwnership
+from backend.app.models.stream import Stream
+from backend.app.models.viewer import StreamLink, ViewerEvent, ViewerSession
+from backend.app.streaming.ice import create_ice_servers, public_ice_config
+from sqlalchemy import select
+from datetime import datetime, timezone
 
 import os
 import aioice.ice
 
 # Default ON for local dev. Set DRONESTREAM_FORCE_LOOPBACK=0 for production.
 FORCE_LOOPBACK = os.environ.get(
-    "DRONESTREAM_FORCE_LOOPBACK", "1"
+    "DRONESTREAM_FORCE_LOOPBACK",
+    os.environ.get("FORCE_LOOPBACK", "1"),
 ).strip().lower() in ("1", "true", "yes", "on")
 
 _original_get_host_addresses = aioice.ice.get_host_addresses
@@ -43,6 +52,13 @@ router = APIRouter(
 
 class WebRTCOffer(BaseModel):
     viewer_token: str
+    sdp: str
+    type: str
+    viewer_session_id: str | None = None
+
+
+class BroadcastOffer(BaseModel):
+    stream_id: str
     sdp: str
     type: str
 
@@ -121,6 +137,130 @@ def force_loopback_host_candidates(sdp: str) -> str:
     return "\r\n".join(lines) + "\r\n"
 
 
+@router.get("/ice-config")
+async def get_ice_config():
+    return public_ice_config()
+
+
+@router.post("/broadcast/offer")
+async def create_broadcast_connection(
+    offer: BroadcastOffer,
+    account: BroadcasterAccount = Depends(get_current_broadcaster),
+):
+    if not account.can_start_streams:
+        raise HTTPException(status_code=403, detail="You cannot broadcast.")
+    if offer.type != "offer":
+        raise HTTPException(status_code=400, detail="Expected a WebRTC offer.")
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Stream)
+            .join(StreamOwnership, StreamOwnership.stream_id == Stream.id)
+            .where(
+                Stream.stream_id == offer.stream_id,
+                StreamOwnership.account_id == account.id,
+            )
+        )
+        stream = result.scalar_one_or_none()
+        if stream is None:
+            raise HTTPException(status_code=404, detail="Owned stream not found.")
+        if stream.status != "starting":
+            raise HTTPException(status_code=409, detail="Start the stream before broadcasting.")
+        stream_key = str(stream.id)
+
+    ice_servers = create_ice_servers()
+    peer_connection = RTCPeerConnection(
+        RTCConfiguration(iceServers=ice_servers)
+    )
+    attached = False
+
+    @peer_connection.on("track")
+    async def on_track(track):
+        nonlocal attached
+        if track.kind != "video":
+            track.stop()
+            return
+        try:
+            stream_manager.attach_publisher(
+                stream_key,
+                track,
+                peer_connection,
+            )
+            attached = True
+        except RuntimeError as error:
+            print("DroneStream: Publisher attach failed:", repr(error))
+            track.stop()
+            return
+
+        async with AsyncSessionLocal() as session:
+            current = await session.get(Stream, stream.id)
+            if current is not None and current.status == "starting":
+                current.status = "live"
+                current.started_at = datetime.now(timezone.utc)
+                await session.commit()
+
+    @peer_connection.on("connectionstatechange")
+    async def on_connection_state_change():
+        if peer_connection.connectionState in {"failed", "closed"}:
+            await stream_manager.stop_stream(stream_key)
+            async with AsyncSessionLocal() as session:
+                current = await session.get(Stream, stream.id)
+                if current is not None and current.status in {"starting", "live"}:
+                    current.status = "offline"
+                    stopped_at = datetime.now(timezone.utc)
+                    current.stopped_at = stopped_at
+                    viewers_result = await session.execute(
+                        select(ViewerSession).where(
+                            ViewerSession.stream_id == current.id,
+                            ViewerSession.status == "watching",
+                        )
+                    )
+                    for viewer in viewers_result.scalars().all():
+                        viewer.status = "stream_ended"
+                        viewer.disconnected_at = stopped_at
+                        session.add(ViewerEvent(
+                            session_id=viewer.id,
+                            event_type="stream_ended",
+                            created_at=stopped_at,
+                        ))
+                    await session.commit()
+
+    try:
+        await peer_connection.setRemoteDescription(
+            RTCSessionDescription(sdp=offer.sdp, type=offer.type)
+        )
+        video_transceiver = next(
+            (item for item in peer_connection.getTransceivers() if item.kind == "video"),
+            None,
+        )
+        if video_transceiver is None:
+            raise ValueError("The broadcaster offer has no video media section.")
+        video_transceiver.direction = "recvonly"
+
+        answer = await peer_connection.createAnswer()
+        await peer_connection.setLocalDescription(answer)
+        await wait_for_ice_gathering_complete(peer_connection)
+        if peer_connection.localDescription is None:
+            raise RuntimeError("WebRTC did not produce a local answer.")
+    except Exception as error:
+        await peer_connection.close()
+        if attached:
+            await stream_manager.stop_stream(stream_key)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unable to establish broadcaster connection: {error}",
+        ) from error
+
+    answer_sdp = peer_connection.localDescription.sdp
+    if FORCE_LOOPBACK:
+        answer_sdp = force_loopback_host_candidates(answer_sdp)
+    return {
+        "success": True,
+        "sdp": answer_sdp,
+        "type": peer_connection.localDescription.type,
+    }
+
+
 @router.post("/offer")
 async def create_webrtc_connection(
     offer: WebRTCOffer,
@@ -130,51 +270,47 @@ async def create_webrtc_connection(
     print("DroneStream: NEW WEBRTC CONNECTION REQUEST")
     print("=" * 70)
 
-    # --------------------------------------------------------------
-    # 1. Validate stream
-    # --------------------------------------------------------------
+    viewer_stream_key = None
+    if offer.viewer_session_id:
+        now = datetime.now(timezone.utc)
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(ViewerSession, Stream, StreamLink)
+                .join(Stream, Stream.id == ViewerSession.stream_id)
+                .join(StreamLink, StreamLink.id == ViewerSession.stream_link_id)
+                .where(
+                    ViewerSession.session_id == offer.viewer_session_id,
+                    ViewerSession.status == "watching",
+                    StreamLink.token == offer.viewer_token,
+                    StreamLink.revoked_at.is_(None),
+                    Stream.status == "live",
+                )
+            )
+            authorized = result.first()
+            if authorized is not None:
+                _, viewer_stream, stream_link = authorized
+                if stream_link.expires_at is None or now < stream_link.expires_at:
+                    viewer_stream_key = str(viewer_stream.id)
 
-    if not stream_state["id"]:
-        raise HTTPException(
-            status_code=404,
-            detail="No stream exists.",
-        )
+        if viewer_stream_key is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Viewer session is not authorized for a live stream.",
+            )
+    else:
+        if not stream_state["id"]:
+            raise HTTPException(status_code=404, detail="No stream exists.")
+        if stream_state["status"] != "live":
+            raise HTTPException(status_code=409, detail="The stream is not currently live.")
+        if not stream_state["viewer_token"] or offer.viewer_token != stream_state["viewer_token"]:
+            raise HTTPException(status_code=403, detail="Invalid or revoked viewer link.")
 
-    # --------------------------------------------------------------
-    # 2. Stream must actually be LIVE
-    # --------------------------------------------------------------
-
-    if stream_state["status"] != "live":
-        raise HTTPException(
-            status_code=409,
-            detail="The stream is not currently live.",
-        )
-
-    # --------------------------------------------------------------
-    # 3. Validate viewer token
-    # --------------------------------------------------------------
-
-    if not stream_state["viewer_token"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Viewer access has not been generated.",
-        )
-
-    if offer.viewer_token != stream_state["viewer_token"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Invalid or revoked viewer link.",
-        )
-
-    # --------------------------------------------------------------
-    # 4. Verify actual media source is running
-    # --------------------------------------------------------------
-
-    if not stream_manager.is_running:
-        raise HTTPException(
-            status_code=503,
-            detail="The streaming source is not running.",
-        )
+    if viewer_stream_key is not None:
+        stream_session = stream_manager.stream_sessions.get(viewer_stream_key)
+        if stream_session is None or stream_session.source_track.readyState != "live":
+            raise HTTPException(status_code=503, detail="The streaming source is not running.")
+    elif not stream_manager.is_running:
+        raise HTTPException(status_code=503, detail="The streaming source is not running.")
 
     print("DroneStream: Viewer token accepted.")
     print("DroneStream: Stream is LIVE.")
@@ -198,21 +334,24 @@ async def create_webrtc_connection(
     # 6. Create peer connection
     # --------------------------------------------------------------
 
-    from aiortc import RTCIceServer
-
-    if FORCE_LOOPBACK:
-        ice_servers = []
-    else:
-        ice_servers = [
-            RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
-            RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
-        ]
+    ice_servers = create_ice_servers()
 
     peer_connection = RTCPeerConnection(
         RTCConfiguration(iceServers=ice_servers)
     )
+    if viewer_stream_key is None:
+        stream_manager.register_peer(peer_connection)
+    else:
+        stream_manager.register_stream_peer(viewer_stream_key, peer_connection)
 
-    stream_manager.register_peer(peer_connection)
+    def unregister_viewer_peer():
+        if viewer_stream_key is None:
+            stream_manager.unregister_peer(peer_connection)
+        else:
+            stream_manager.unregister_stream_peer(
+                viewer_stream_key,
+                peer_connection,
+            )
 
     print("DroneStream: Peer connection created.")
 
@@ -221,27 +360,29 @@ async def create_webrtc_connection(
     # --------------------------------------------------------------
 
     try:
-        video_track = stream_manager.subscribe()
-
+        video_track = (
+            stream_manager.subscribe_stream(viewer_stream_key)
+            if viewer_stream_key is not None
+            else stream_manager.subscribe()
+        )
         print(
             "DroneStream: Shared video track subscribed "
             "for this viewer."
         )
-
     except Exception as error:
-        stream_manager.unregister_peer(peer_connection)
-
+        if viewer_stream_key is None:
+            stream_manager.unregister_peer(peer_connection)
+        else:
+            stream_manager.unregister_stream_peer(
+                viewer_stream_key,
+                peer_connection,
+            )
         await peer_connection.close()
-
-        print(
-            "DroneStream: FAILED to subscribe to shared source:",
-            repr(error),
-        )
-
+        print("DroneStream: FAILED to subscribe to shared source:", repr(error))
         raise HTTPException(
             status_code=500,
             detail=f"Unable to access stream source: {error}",
-        )
+        ) from error
 
     # --------------------------------------------------------------
     # 8. Find browser video transceiver
@@ -316,7 +457,7 @@ async def create_webrtc_connection(
         )
 
     except Exception as error:
-        stream_manager.unregister_peer(peer_connection)
+        unregister_viewer_peer()
 
         await peer_connection.close()
 
@@ -360,9 +501,7 @@ async def create_webrtc_connection(
             )
             print("=" * 70)
 
-            stream_manager.unregister_peer(
-                peer_connection
-            )
+            unregister_viewer_peer()
 
         elif state == "disconnected":
 
@@ -370,9 +509,7 @@ async def create_webrtc_connection(
                 "DroneStream: WebRTC connection disconnected."
             )
 
-            stream_manager.unregister_peer(
-                peer_connection
-            )
+            unregister_viewer_peer()
 
         elif state == "closed":
 
@@ -380,9 +517,7 @@ async def create_webrtc_connection(
                 "DroneStream: WebRTC connection closed."
             )
 
-            stream_manager.unregister_peer(
-                peer_connection
-            )
+            unregister_viewer_peer()
 
     # --------------------------------------------------------------
     # 12. ICE state
@@ -468,9 +603,7 @@ async def create_webrtc_connection(
 
     except Exception as error:
 
-        stream_manager.unregister_peer(
-            peer_connection
-        )
+        unregister_viewer_peer()
 
         await peer_connection.close()
 
@@ -506,9 +639,7 @@ async def create_webrtc_connection(
 
     except Exception as error:
 
-        stream_manager.unregister_peer(
-            peer_connection
-        )
+        unregister_viewer_peer()
 
         await peer_connection.close()
 
@@ -549,9 +680,7 @@ async def create_webrtc_connection(
 
     if not peer_connection.localDescription:
 
-        stream_manager.unregister_peer(
-            peer_connection
-        )
+        unregister_viewer_peer()
 
         await peer_connection.close()
 

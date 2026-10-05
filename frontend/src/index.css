@@ -499,6 +499,29 @@ footer {
   font-weight: 700;
 }
 
+.admin-viewer-share-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.admin-viewer-share-actions a,
+.admin-viewer-share-actions button {
+  flex: 0 0 auto;
+  padding: 8px 9px;
+  border: 1px solid #354052;
+  border-radius: 5px;
+  background: #121821;
+  color: #d9dfe8;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
 /* ============================================================
    ADMIN NAVIGATION
    ============================================================ */

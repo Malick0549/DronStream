@@ -5,6 +5,7 @@ from backend.app.screenshots.service import (
 )
 from pydantic import BaseModel
 from backend.app.models import PlatformSettings, SecurityLog
+from backend.app.models.account import StreamOwnership
 from fastapi import APIRouter, Depends
 from sqlalchemy import select, func
 from pathlib import Path
@@ -78,6 +79,20 @@ async def get_or_create_settings(session) -> PlatformSettings:
     return row
 
 
+async def get_latest_legacy_stream(session):
+    result = await session.execute(
+        select(Stream)
+        .where(
+            ~select(StreamOwnership.id)
+            .where(StreamOwnership.stream_id == Stream.id)
+            .exists()
+        )
+        .order_by(Stream.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 # ------------------------------------------------------------------
 # ADMIN DASHBOARD
 # ------------------------------------------------------------------
@@ -88,13 +103,7 @@ async def admin_dashboard(
 ):
     async with AsyncSessionLocal() as session:
 
-        result = await session.execute(
-            select(Stream)
-            .order_by(Stream.created_at.desc())
-            .limit(1)
-        )
-
-        stream = result.scalar_one_or_none()
+        stream = await get_latest_legacy_stream(session)
 
         if not stream:
             return {
@@ -185,11 +194,7 @@ async def admin_dashboard(
 
             "source": {
                 "running": stream_manager.is_running,
-                "type": (
-                    "ffmpeg"
-                    if stream_manager.is_running
-                    else "none"
-                ),
+                "type": stream_manager.source_type,
                 "resolution": resolution_label,
             },
 
@@ -211,13 +216,7 @@ async def stream_health(
 ):
     async with AsyncSessionLocal() as session:
 
-        result = await session.execute(
-            select(Stream)
-            .order_by(Stream.created_at.desc())
-            .limit(1)
-        )
-
-        stream = result.scalar_one_or_none()
+        stream = await get_latest_legacy_stream(session)
 
         if not stream:
 
@@ -244,9 +243,7 @@ async def stream_health(
 
         source_running = stream_manager.is_running
 
-        active_connections = len(
-            stream_manager.peer_connections
-        )
+        active_connections = stream_manager.active_peer_count
 
         if stream.status == "live" and source_running:
 
@@ -327,13 +324,7 @@ async def stream_stats(
 ):
     async with AsyncSessionLocal() as session:
 
-        result = await session.execute(
-            select(Stream)
-            .order_by(Stream.created_at.desc())
-            .limit(1)
-        )
-
-        stream = result.scalar_one_or_none()
+        stream = await get_latest_legacy_stream(session)
 
         if not stream:
 
@@ -386,9 +377,7 @@ async def stream_stats(
                 "stream_id": stream.stream_id,
                 "status": stream.status,
                 "viewer_count": viewer_count,
-                "webrtc_connections": len(
-                    stream_manager.peer_connections
-                ),
+                "webrtc_connections": stream_manager.active_peer_count,
                 "uptime_seconds": uptime_seconds,
                 "resolution": (
                     "1280x720"
@@ -883,13 +872,7 @@ async def start_recording(
 
     async with AsyncSessionLocal() as session:
 
-        result = await session.execute(
-            select(Stream)
-            .order_by(Stream.created_at.desc())
-            .limit(1)
-        )
-
-        stream = result.scalar_one_or_none()
+        stream = await get_latest_legacy_stream(session)
 
         if not stream:
             return {
@@ -909,7 +892,7 @@ async def start_recording(
                 "message": "A recording is already in progress.",
             }
 
-        if not stream_manager.is_running:
+        if not stream_manager.has_stream_source(str(stream.id)):
             return {
                 "success": False,
                 "message": "The stream source is not running.",
@@ -932,7 +915,7 @@ async def start_recording(
         try:
 
             source_track = (
-                stream_manager.subscribe_recording()
+                stream_manager.subscribe_recording(str(stream.id))
             )
 
             recording = recording_service.start(
@@ -1379,13 +1362,7 @@ async def capture_screenshot(
 
     async with AsyncSessionLocal() as session:
 
-        result = await session.execute(
-            select(Stream)
-            .order_by(Stream.created_at.desc())
-            .limit(1)
-        )
-
-        stream = result.scalar_one_or_none()
+        stream = await get_latest_legacy_stream(session)
 
         if not stream:
             return {
@@ -1427,10 +1404,9 @@ async def capture_screenshot(
 
         try:
 
-            screenshot_subscription = (
-                stream_manager.relay.subscribe(
-                    stream_manager.source.video
-                )
+            screenshot_subscription = stream_manager.subscribe_stream_source(
+                str(stream.id),
+                buffered=False,
             )
 
             screenshot = (
