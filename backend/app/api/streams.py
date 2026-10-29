@@ -17,6 +17,11 @@ router = APIRouter(
 )
 
 
+class StreamSourceRequest(BaseModel):
+    source_type: str = "test_video"
+    capture_device_name: str | None = None
+
+
 # ------------------------------------------------------------------
 # WebRTC compatibility state
 # ------------------------------------------------------------------
@@ -178,6 +183,7 @@ async def create_stream(
 
 @router.post("/start")
 async def start_stream(
+    request: StreamSourceRequest,
     admin: str = Depends(get_current_admin),
 ):
     async with AsyncSessionLocal() as session:
@@ -200,16 +206,71 @@ async def start_stream(
         )
         platform_settings = settings_result.scalar_one_or_none()
 
+        mode = (
+            getattr(platform_settings, "stream_input_mode", None)
+            if platform_settings
+            else None
+        ) or "test_video"
+        mode = str(mode).lower().strip()
+
+        # Backward compat with old toggle
         if (
             platform_settings
             and getattr(platform_settings, "use_capture_card", False)
+            and mode == "test_video"
         ):
+            mode = "capture_card"
+
+        if mode not in {
+            "test_video",
+            "capture_card",
+            "browser_camera",
+            "browser_file",
+            "browser",
+        }:
+            return {
+                "success": False,
+                "message": "Invalid stream_input_mode in Settings.",
+            }
+
+        # Browser camera / file: prepare stream; browser will publish media next
+        if mode in {"browser_camera", "browser_file", "browser"}:
+            stream_manager.stop_ffmpeg_source()
+            await stream_manager.detach_publisher(str(stream.id))
+            stream.status = "starting"
+            stream.started_at = None
+            stream.stopped_at = None
+            await session.commit()
+
+            link = await get_active_stream_link(session, stream.id)
+            update_stream_state(
+                stream,
+                viewer_token=link.token if link else None,
+                viewer_count=0,
+            )
+
+            return {
+                "success": True,
+                "stream": {
+                    "id": stream.stream_id,
+                    "status": stream.status,
+                },
+                "source": {
+                    "type": mode,
+                    "requires_browser_media": True,
+                },
+            }
+
+        if mode == "test_video":
+            source_type = "test_video"
+            input_source = VIDEO_FILE
+        else:
+            source_type = "capture_card"
             input_source = (
-                platform_settings.capture_device_name
+                request.capture_device_name
+                or getattr(platform_settings, "capture_device_name", None)
                 or "USB Video"
             )
-        else:
-            input_source = VIDEO_FILE
 
         try:
             quality = (
@@ -223,6 +284,7 @@ async def start_stream(
                 "1080p": (1920, 1080),
             }
             w, h = quality_map.get(str(quality).lower(), (1280, 720))
+            stream_manager.stop_ffmpeg_source()
             stream_manager.start(
                 input_source=input_source,
                 width=w,
@@ -334,6 +396,79 @@ async def start_stream(
                 "viewer_count": viewer_count,
             },
             "recording": recording_payload,
+        }
+
+
+@router.post("/switch-source")
+async def switch_stream_source(
+    request: StreamSourceRequest,
+    admin: str = Depends(get_current_admin),
+):
+    async with AsyncSessionLocal() as session:
+        stream = await get_latest_stream(session)
+        if stream is None:
+            return {"success": False, "message": "No stream has been created."}
+        if stream.status != "live":
+            return {
+                "success": False,
+                "message": "The stream must be live before its source can be switched.",
+            }
+
+        source_type = request.source_type.lower()
+        if source_type not in {"capture_card", "camera", "test_video"}:
+            return {
+                "success": False,
+                "message": "Source type must be capture_card, camera, or test_video.",
+            }
+
+        from backend.app.models.settings import PlatformSettings
+        from backend.app.streaming.input_source import VIDEO_FILE
+
+        settings_result = await session.execute(
+            select(PlatformSettings).order_by(PlatformSettings.id.asc()).limit(1)
+        )
+        platform_settings = settings_result.scalar_one_or_none()
+        input_source = (
+            request.capture_device_name
+            or getattr(platform_settings, "capture_device_name", None)
+            or "USB Video"
+        ) if source_type != "test_video" else VIDEO_FILE
+
+        stream_id = str(stream.id)
+        await stream_manager.detach_publisher(stream_id)
+        try:
+            stream_manager.stop_ffmpeg_source()
+            stream_manager.start(
+                input_source=input_source,
+                width=1280,
+                height=720,
+            )
+            stream_session = stream_manager.stream_sessions.get(stream_id)
+            if stream_session is not None:
+                stream_session.source_track.set_source(stream_manager.source.video)
+            else:
+                stream_manager.bind_existing_source(stream_id)
+        except Exception as error:
+            return {
+                "success": False,
+                "message": f"Unable to switch source: {error}",
+            }
+
+        from backend.app.models.security_log import SecurityLog
+
+        session.add(
+            SecurityLog(
+                event="stream_source_switch",
+                actor=admin,
+                detail=f"Stream {stream.stream_id} switched to {source_type}",
+            )
+        )
+        await session.commit()
+
+        return {
+            "success": True,
+            "stream": {"id": stream.stream_id, "status": stream.status},
+            "source": {"type": source_type},
         }
 # ------------------------------------------------------------------
 # STOP STREAM

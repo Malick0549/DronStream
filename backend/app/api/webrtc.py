@@ -1,6 +1,6 @@
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from aiortc import (
@@ -12,16 +12,20 @@ from aiortc import (
 
 from backend.app.api.streams import stream_state
 from backend.app.streaming.manager import stream_manager
-from backend.app.auth.dependencies import get_current_broadcaster
+from backend.app.auth.dependencies import get_current_broadcaster, get_current_admin
 from backend.app.database import AsyncSessionLocal
 from backend.app.models.account import BroadcasterAccount, StreamOwnership
 from backend.app.models.stream import Stream
 from backend.app.models.viewer import StreamLink, ViewerEvent, ViewerSession
+from backend.app.models.security_log import SecurityLog
 from backend.app.streaming.ice import create_ice_servers, public_ice_config
 from sqlalchemy import select
 from datetime import datetime, timezone
 
 import os
+import logging
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("aioice").setLevel(logging.DEBUG)
 import aioice.ice
 
 # Default ON for local dev. Set DRONESTREAM_FORCE_LOOPBACK=0 for production.
@@ -48,6 +52,23 @@ router = APIRouter(
     prefix="/api/webrtc",
     tags=["WebRTC"],
 )
+
+def force_loopback_host_candidates(sdp: str) -> str:
+    """Local-dev: map host ICE candidate IPs to 127.0.0.1."""
+    lines = []
+
+    for line in sdp.splitlines():
+        if line.startswith("a=candidate:") and " typ host" in line:
+            line = re.sub(
+                r"(\d{1,3}(?:\.\d{1,3}){3})",
+                "127.0.0.1",
+                line,
+                count=1,
+            )
+
+        lines.append(line)
+
+    return "\r\n".join(lines) + "\r\n"
 
 
 class WebRTCOffer(BaseModel):
@@ -149,6 +170,8 @@ async def create_broadcast_connection(
 ):
     if not account.can_start_streams:
         raise HTTPException(status_code=403, detail="You cannot broadcast.")
+    if not account.can_publish_browser:
+        raise HTTPException(status_code=403, detail="You cannot publish browser video.")
     if offer.type != "offer":
         raise HTTPException(status_code=400, detail="Expected a WebRTC offer.")
 
@@ -198,6 +221,27 @@ async def create_broadcast_connection(
                 current.status = "live"
                 current.started_at = datetime.now(timezone.utc)
                 await session.commit()
+                
+                from backend.app.api.streams import update_stream_state, get_active_viewer_count
+
+                async with AsyncSessionLocal() as session2:
+                    current2 = await session2.get(Stream, stream_db_id)
+                    if current2 is not None:
+                        link_result = await session2.execute(
+                            select(StreamLink)
+                            .where(
+                                StreamLink.stream_id == current2.id,
+                                StreamLink.revoked_at.is_(None),
+                            )
+                            .limit(1)
+                        )
+                        link = link_result.scalar_one_or_none()
+                        count = await get_active_viewer_count(session2, current2.id)
+                        update_stream_state(
+                            current2,
+                            viewer_token=link.token if link else None,
+                            viewer_count=count,
+                        )
 
     @peer_connection.on("connectionstatechange")
     async def on_connection_state_change():
@@ -305,10 +349,26 @@ async def create_webrtc_connection(
         if not stream_state["viewer_token"] or offer.viewer_token != stream_state["viewer_token"]:
             raise HTTPException(status_code=403, detail="Invalid or revoked viewer link.")
 
+        # Map public stream_id -> DB id so browser publisher sessions work
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Stream).where(Stream.stream_id == stream_state["id"])
+            )
+            live_stream = result.scalar_one_or_none()
+            if live_stream is not None:
+                candidate_key = str(live_stream.id)
+                if candidate_key in stream_manager.stream_sessions:
+                    viewer_stream_key = candidate_key
+
     if viewer_stream_key is not None:
         stream_session = stream_manager.stream_sessions.get(viewer_stream_key)
         if stream_session is None or stream_session.source_track.readyState != "live":
-            raise HTTPException(status_code=503, detail="The streaming source is not running.")
+            # FFmpeg-only streams may only have manager.source
+            if not stream_manager.is_running:
+                raise HTTPException(
+                    status_code=503,
+                    detail="The streaming source is not running.",
+                )
     elif not stream_manager.is_running:
         raise HTTPException(status_code=503, detail="The streaming source is not running.")
 
@@ -356,27 +416,45 @@ async def create_webrtc_connection(
     print("DroneStream: Peer connection created.")
 
     # --------------------------------------------------------------
-    # 7. Get shared video track
+    # 7. Set browser offer FIRST (so transceivers exist)
     # --------------------------------------------------------------
 
     try:
-        video_track = (
-            stream_manager.subscribe_stream(viewer_stream_key)
-            if viewer_stream_key is not None
-            else stream_manager.subscribe()
+        offer_sdp = offer.sdp
+        if FORCE_LOOPBACK:
+            offer_sdp = force_loopback_host_candidates(offer_sdp)
+
+        await peer_connection.setRemoteDescription(
+            RTCSessionDescription(sdp=offer_sdp, type=offer.type)
         )
+        print("DroneStream: Browser offer accepted.")
+    except Exception as error:
+        unregister_viewer_peer()
+        await peer_connection.close()
+        print("DroneStream: FAILED to set remote description:", repr(error))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid WebRTC offer: {error}",
+        ) from error
+
+    # --------------------------------------------------------------
+    # 8. Get shared video track
+    # --------------------------------------------------------------
+
+    try:
+        if viewer_stream_key is not None:
+            video_track = stream_manager.subscribe_stream_source(
+                viewer_stream_key,
+                buffered=False,
+            )
+        else:
+            video_track = stream_manager.subscribe()
         print(
-            "DroneStream: Shared video track subscribed "
-            "for this viewer."
+            "DroneStream: Shared video track subscribed for this viewer. key=",
+            viewer_stream_key,
         )
     except Exception as error:
-        if viewer_stream_key is None:
-            stream_manager.unregister_peer(peer_connection)
-        else:
-            stream_manager.unregister_stream_peer(
-                viewer_stream_key,
-                peer_connection,
-            )
+        unregister_viewer_peer()
         await peer_connection.close()
         print("DroneStream: FAILED to subscribe to shared source:", repr(error))
         raise HTTPException(
@@ -385,91 +463,44 @@ async def create_webrtc_connection(
         ) from error
 
     # --------------------------------------------------------------
-    # 8. Find browser video transceiver
+    # 9. Use offer transceiver + attach track
     # --------------------------------------------------------------
 
-    video_transceiver = None
-
-    for transceiver in peer_connection.getTransceivers():
-        if transceiver.kind == "video":
-            video_transceiver = transceiver
-            break
-
+    video_transceiver = next(
+        (t for t in peer_connection.getTransceivers() if t.kind == "video"),
+        None,
+    )
     if video_transceiver is None:
-        print(
-            "DroneStream: Browser did not provide "
-            "a video transceiver. Creating one."
-        )
-
         video_transceiver = peer_connection.addTransceiver(
-            "video",
-            direction="sendrecv",
+            "video", direction="sendonly"
         )
-
     else:
-        print(
-            "DroneStream: Browser video transceiver found."
-        )
-
         video_transceiver.direction = "sendonly"
-
-    # --------------------------------------------------------------
-    # 9. Prefer VP8
-    # --------------------------------------------------------------
 
     try:
         capabilities = RTCRtpSender.getCapabilities("video")
-
         if capabilities and capabilities.codecs:
-
-            vp8_codecs = [
-                codec
-                for codec in capabilities.codecs
-                if codec.mimeType.lower() == "video/vp8"
+            vp8 = [
+                c for c in capabilities.codecs
+                if c.mimeType.lower() == "video/vp8"
             ]
-
-            if vp8_codecs:
-                video_transceiver.setCodecPreferences(
-                    vp8_codecs
-                )
-
-                print(
-                    "DroneStream: VP8 codec selected."
-                )
-
+            if vp8:
+                video_transceiver.setCodecPreferences(vp8)
+                print("DroneStream: VP8 codec selected.")
     except Exception as error:
-        print(
-            "DroneStream: Codec preference warning:",
-            repr(error),
-        )
-
-    # --------------------------------------------------------------
-    # 10. Attach shared relay track
-    # --------------------------------------------------------------
+        print("DroneStream: Codec preference warning:", repr(error))
 
     try:
-        video_transceiver.sender.replaceTrack(
-            video_track
-        )
-
-        print(
-            "DroneStream: Shared relay video track attached."
-        )
-
+        video_transceiver.sender.replaceTrack(video_track)
+        print("DroneStream: Shared relay video track attached.")
     except Exception as error:
         unregister_viewer_peer()
-
         await peer_connection.close()
-
-        print(
-            "DroneStream: FAILED to attach video track:",
-            repr(error),
-        )
-
+        print("DroneStream: FAILED to attach video track:", repr(error))
         raise HTTPException(
             status_code=500,
             detail=f"Unable to attach video track: {error}",
-        )
+        ) from error
 
     # --------------------------------------------------------------
     # 11. Connection state
@@ -582,40 +613,6 @@ async def create_webrtc_connection(
             peer_connection.signalingState,
         )
 
-    # --------------------------------------------------------------
-    # 14. Set browser offer
-    # --------------------------------------------------------------
-
-    try:
-
-        remote_description = RTCSessionDescription(
-            sdp=offer.sdp,
-            type=offer.type,
-        )
-
-        await peer_connection.setRemoteDescription(
-            remote_description
-        )
-
-        print(
-            "DroneStream: Browser offer accepted."
-        )
-
-    except Exception as error:
-
-        unregister_viewer_peer()
-
-        await peer_connection.close()
-
-        print(
-            "DroneStream: FAILED to set remote description:",
-            repr(error),
-        )
-
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid WebRTC offer: {error}",
-        )
 
     # --------------------------------------------------------------
     # 15. Create answer
@@ -746,4 +743,156 @@ async def create_webrtc_connection(
         "success": True,
         "sdp": answer_sdp,
         "type": answer_type,
+    }
+    
+@router.post("/admin/publish-offer")
+async def admin_publish_offer(
+    offer: BroadcastOffer,
+    admin: str = Depends(get_current_admin),
+):
+    """
+    Admin dashboard publishes machine camera or local video file
+    (Settings: browser_camera / browser_file).
+    """
+    if offer.type != "offer":
+        raise HTTPException(status_code=400, detail="Expected a WebRTC offer.")
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Stream).where(Stream.stream_id == offer.stream_id)
+        )
+        stream = result.scalar_one_or_none()
+        if stream is None:
+            raise HTTPException(status_code=404, detail="Stream not found.")
+        if stream.status not in {"starting", "live"}:
+            raise HTTPException(
+                status_code=409,
+                detail="Start the stream before publishing browser media.",
+            )
+        stream_db_id = stream.id
+        stream_key = str(stream.id)
+        stream_public_id = stream.stream_id
+
+    ice_servers = create_ice_servers()
+    peer_connection = RTCPeerConnection(
+        RTCConfiguration(iceServers=ice_servers)
+    )
+    attached = False
+
+    @peer_connection.on("track")
+    async def on_track(track):
+        nonlocal attached
+        if track.kind != "video":
+            track.stop()
+            return
+        try:
+            stream_manager.attach_publisher(
+                stream_key,
+                track,
+                peer_connection,
+            )
+            attached = True
+        except RuntimeError as error:
+            print("DroneStream: Admin publisher attach failed:", repr(error))
+            track.stop()
+            return
+
+        async with AsyncSessionLocal() as session:
+            current = await session.get(Stream, stream_db_id)
+            if current is not None and current.status in {"starting", "live"}:
+                current.status = "live"
+                current.started_at = datetime.now(timezone.utc)
+                current.stopped_at = None
+                session.add(
+                    SecurityLog(
+                        event="stream_start",
+                        actor=admin,
+                        detail=f"Admin browser publish on {stream_public_id}",
+                    )
+                )
+                await session.commit()
+
+    @peer_connection.on("connectionstatechange")
+    async def on_connection_state_change():
+        if peer_connection.connectionState in {"failed", "closed"}:
+            await stream_manager.detach_publisher(stream_key)
+
+    try:
+        offer_sdp = offer.sdp
+        if FORCE_LOOPBACK:
+            offer_sdp = force_loopback_host_candidates(offer_sdp)
+        await peer_connection.setRemoteDescription(
+            RTCSessionDescription(sdp=offer_sdp, type=offer.type)
+        )
+        video_transceiver = next(
+            (
+                item
+                for item in peer_connection.getTransceivers()
+                if item.kind == "video"
+            ),
+            None,
+        )
+        if video_transceiver is None:
+            raise ValueError("The admin offer has no video media section.")
+        video_transceiver.direction = "recvonly"
+
+        answer = await peer_connection.createAnswer()
+        await peer_connection.setLocalDescription(answer)
+        await wait_for_ice_gathering_complete(peer_connection)
+        if peer_connection.localDescription is None:
+            raise RuntimeError("WebRTC did not produce a local answer.")
+    except Exception as error:
+        await peer_connection.close()
+        if attached:
+            await stream_manager.detach_publisher(stream_key)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unable to establish admin publish connection: {error}",
+        ) from error
+
+    # Mark live BEFORE viewers connect (do not wait only for on_track)
+    async with AsyncSessionLocal() as session:
+        current = await session.get(Stream, stream_db_id)
+        if current is not None:
+            current.status = "live"
+            current.started_at = datetime.now(timezone.utc)
+            current.stopped_at = None
+            session.add(
+                SecurityLog(
+                    event="stream_start",
+                    actor=admin,
+                    detail=f"Admin browser publish on {stream_public_id}",
+                )
+            )
+            await session.commit()
+
+            from backend.app.api.streams import (
+                update_stream_state,
+                get_active_viewer_count,
+            )
+
+            link_result = await session.execute(
+                select(StreamLink)
+                .where(
+                    StreamLink.stream_id == current.id,
+                    StreamLink.revoked_at.is_(None),
+                )
+                .limit(1)
+            )
+            link = link_result.scalar_one_or_none()
+            count = await get_active_viewer_count(session, current.id)
+            update_stream_state(
+                current,
+                viewer_token=link.token if link else None,
+                viewer_count=count,
+            )
+
+    answer_sdp = peer_connection.localDescription.sdp
+    if FORCE_LOOPBACK:
+        answer_sdp = force_loopback_host_candidates(answer_sdp)
+
+    return {
+        "success": True,
+        "sdp": answer_sdp,
+        "type": peer_connection.localDescription.type,
     }

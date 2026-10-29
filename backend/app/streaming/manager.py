@@ -4,6 +4,40 @@ from aiortc.contrib.media import MediaRelay
 from backend.app.streaming.input_source import FFmpegVideoSource
 
 
+class SwitchableVideoTrack(MediaStreamTrack):
+    """A stable relay track whose delegate can be replaced safely."""
+
+    def __init__(self, source_track: MediaStreamTrack):
+        super().__init__()
+        self._source_track = source_track
+        self._ready_state = "live"
+
+    @property
+    def readyState(self) -> str:
+        return self._ready_state
+
+    def set_source(self, source_track: MediaStreamTrack):
+        if source_track is self._source_track:
+            return
+        previous_track = self._source_track
+        self._source_track = source_track
+        self._ready_state = "live" if source_track.readyState == "live" else "ended"
+        if previous_track is not None and previous_track is not self:
+            try:
+                previous_track.stop()
+            except Exception:
+                pass
+
+    async def recv(self):
+        return await self._source_track.recv()
+
+    def stop(self):
+        self._ready_state = "ended"
+        try:
+            self._source_track.stop()
+        except Exception:
+            pass
+
 
 class StreamMediaSession:
     def __init__(
@@ -11,7 +45,7 @@ class StreamMediaSession:
         source_track: MediaStreamTrack,
         publisher: RTCPeerConnection | None = None,
     ):
-        self.source_track = source_track
+        self.source_track = SwitchableVideoTrack(source_track)
         self.publisher = publisher
         self.relay = MediaRelay()
         self.peer_connections: set[RTCPeerConnection] = set()
@@ -33,8 +67,8 @@ class StreamManager:
         self.peer_connections: set[RTCPeerConnection] = set()
         self.recording_subscription = None
         self.stream_sessions: dict[str, StreamMediaSession] = {}
-        
-        
+        self._detaching_streams: set[str] = set()
+
     @property
     def is_running(self) -> bool:
         return self.source is not None or any(
@@ -165,8 +199,14 @@ class StreamManager:
         peer_connection: RTCPeerConnection,
     ):
         current = self.stream_sessions.get(stream_key)
-        if current is not None and current.source_track.readyState == "live":
+        if current is not None and current.publisher is not None:
             raise RuntimeError("This stream already has a live publisher.")
+
+        if current is not None:
+            current.source_track.set_source(source_track)
+            current.publisher = peer_connection
+            current.peer_connections.add(peer_connection)
+            return
 
         self.stream_sessions[stream_key] = StreamMediaSession(
             source_track=source_track,
@@ -179,6 +219,60 @@ class StreamManager:
         self.stream_sessions[stream_key] = StreamMediaSession(
             source_track=self.source.video,
         )
+
+    def replace_publisher_source(
+        self,
+        stream_key: str,
+        source_track: MediaStreamTrack,
+    ):
+        stream_session = self.stream_sessions.get(stream_key)
+        if stream_session is None:
+            raise RuntimeError("The stream media session does not exist.")
+        if stream_session.publisher is None:
+            raise RuntimeError("The stream has no active publisher.")
+        stream_session.source_track.set_source(source_track)
+
+    def stop_ffmpeg_source(self):
+        previous_source = self.source
+        self.source = None
+        if previous_source is not None:
+            previous_source.stop()
+
+    def replace_ffmpeg_source(
+        self,
+        stream_key: str,
+        source: FFmpegVideoSource,
+    ):
+        stream_session = self.stream_sessions.get(stream_key)
+        if stream_session is not None:
+            stream_session.source_track.set_source(source.video)
+
+        previous_source = self.source
+        self.source = source
+        if previous_source is not None:
+            previous_source.stop()
+
+    async def replace_publisher(
+        self,
+        stream_key: str,
+        peer_connection: RTCPeerConnection,
+    ):
+        stream_session = self.stream_sessions.get(stream_key)
+        if stream_session is None:
+            raise RuntimeError("The stream media session does not exist.")
+
+        previous_publisher = stream_session.publisher
+        if previous_publisher is not None and previous_publisher is not peer_connection:
+            try:
+                await previous_publisher.close()
+            except Exception:
+                pass
+
+        stream_session.source_track.set_source(
+            stream_session.source_track._source_track
+        )
+        stream_session.publisher = peer_connection
+        stream_session.peer_connections.add(peer_connection)
 
     def subscribe_stream(self, stream_key: str) -> MediaStreamTrack:
         stream_session = self.stream_sessions.get(stream_key)
@@ -239,6 +333,23 @@ class StreamManager:
         if stream_session is not None:
             stream_session.peer_connections.discard(peer_connection)
 
+    async def detach_publisher(self, stream_key: str):
+        stream_session = self.stream_sessions.get(stream_key)
+        if stream_session is None:
+            return
+
+        publisher = stream_session.publisher
+        stream_session.publisher = None
+        stream_session.peer_connections.discard(publisher)
+        if publisher is not None:
+            try:
+                await publisher.close()
+            except Exception as error:
+                print(
+                    "DroneStream: Error closing publisher peer:",
+                    repr(error),
+                )
+
     async def stop_stream(self, stream_key: str):
         stream_session = self.stream_sessions.pop(stream_key, None)
         if stream_session is None:
@@ -253,14 +364,14 @@ class StreamManager:
                     repr(error),
                 )
 
-        if stream_session.publisher is not None:
-            try:
-                stream_session.source_track.stop()
-            except Exception as error:
-                print(
-                    "DroneStream: Error stopping stream track:",
-                    repr(error),
-                )
+        await self.detach_publisher(stream_key)
+        try:
+            stream_session.source_track.stop()
+        except Exception as error:
+            print(
+                "DroneStream: Error stopping stream track:",
+                repr(error),
+            )
 
     def register_peer(
         self,

@@ -45,3 +45,7 @@ class PlatformSettings(Base):
     stream_quality: Mapped[str] = mapped_column(
         String(20), default="720p", nullable=False
     )
+    
+    stream_input_mode: Mapped[str] = mapped_column(
+        String(40), default="test_video", nullable=False
+    )

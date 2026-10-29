@@ -64,6 +64,7 @@ def _account_payload(account: BroadcasterAccount) -> dict:
             "can_record": account.can_record,
             "can_screenshot": account.can_screenshot,
             "can_manage_viewers": account.can_manage_viewers,
+            "can_publish_browser": account.can_publish_browser,
         },
     }
 
@@ -90,10 +91,15 @@ class AccountPermissionsUpdate(BaseModel):
     can_record: bool | None = None
     can_screenshot: bool | None = None
     can_manage_viewers: bool | None = None
+    can_publish_browser: bool | None = None
 
 
 class StreamCreateRequest(BaseModel):
     title: str = Field(default="Live stream", min_length=1, max_length=100)
+
+
+class BrowserStreamStartRequest(BaseModel):
+    source_type: str = "browser"
 
 
 class ViewerLinkCreateRequest(BaseModel):
@@ -477,10 +483,15 @@ async def revoke_broadcaster_link(
 @router.post("/streams/{stream_key}/start")
 async def prepare_broadcaster_stream(
     stream_key: str,
+    request: BrowserStreamStartRequest,
     account: BroadcasterAccount = Depends(get_current_broadcaster),
 ):
     if not account.can_start_streams:
         raise HTTPException(status_code=403, detail="You cannot start streams.")
+    if request.source_type != "browser":
+        raise HTTPException(status_code=400, detail="Only browser publishing is supported here.")
+    if not account.can_publish_browser:
+        raise HTTPException(status_code=403, detail="You cannot publish browser video.")
 
     async with AsyncSessionLocal() as session:
         result = await session.execute(

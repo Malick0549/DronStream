@@ -48,6 +48,7 @@ class SettingsUpdate(BaseModel):
     use_capture_card: bool | None = None
     capture_device_name: str | None = None
     stream_quality: str | None = None
+    stream_input_mode: str | None = None
 
 
 def settings_to_dict(row: PlatformSettings) -> dict:
@@ -61,6 +62,7 @@ def settings_to_dict(row: PlatformSettings) -> dict:
         "use_capture_card": row.use_capture_card,
         "capture_device_name": row.capture_device_name,
         "stream_quality": getattr(row, "stream_quality", "720p") or "720p",
+        "stream_input_mode": getattr(row, "stream_input_mode", "test_video") or "test_video",
     }
 
 
@@ -1651,10 +1653,14 @@ async def download_screenshot(
 # SETTINGS
 # ------------------------------------------------------------------
 
+from fastapi import Response
+
 @router.get("/settings")
 async def get_settings(
+    response: Response,
     admin: str = Depends(get_current_admin),
 ):
+    response.headers["Cache-Control"] = "no-store"
     async with AsyncSessionLocal() as session:
         row = await get_or_create_settings(session)
         return {
@@ -1676,6 +1682,17 @@ async def update_settings(
         for key, value in data.items():
             if value is not None and hasattr(row, key):
                 setattr(row, key, value)
+
+        # Keep stream_input_mode and use_capture_card in sync
+        if "stream_input_mode" in data and data["stream_input_mode"] is not None:
+            mode = str(data["stream_input_mode"]).lower().strip()
+            row.stream_input_mode = mode
+            row.use_capture_card = mode == "capture_card"
+        elif "use_capture_card" in data and data["use_capture_card"] is not None:
+            if data["use_capture_card"] and row.stream_input_mode == "test_video":
+                row.stream_input_mode = "capture_card"
+            if not data["use_capture_card"] and row.stream_input_mode == "capture_card":
+                row.stream_input_mode = "test_video"
 
         row.updated_at = datetime.now(timezone.utc)
 

@@ -13,24 +13,40 @@ def _turn_credentials() -> tuple[str, str] | None:
         return None
 
     expires_at = int(time.time()) + settings.turn_credential_ttl_seconds
+
     username = f"{expires_at}:dronestream"
+
     digest = hmac.new(
         settings.turn_shared_secret.encode("utf-8"),
         username.encode("utf-8"),
         hashlib.sha1,
     ).digest()
+
     credential = base64.b64encode(digest).decode("ascii")
+
     return username, credential
 
 
 def create_ice_servers() -> list[RTCIceServer]:
-    if settings.environment.lower() in {"development", "dev"} and settings.force_loopback:
+    """
+    Return the ICE servers used by aiortc.
+    When FORCE_LOOPBACK is on, return no STUN/TURN so local 127.0.0.1 only.
+    """
+    import os
+
+    force_loopback = os.environ.get(
+        "DRONESTREAM_FORCE_LOOPBACK",
+        os.environ.get("FORCE_LOOPBACK", "1"),
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+    if force_loopback:
         return []
 
     servers = [
         RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
         RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
     ]
+
     credentials = _turn_credentials()
     if credentials is not None:
         username, credential = credentials
@@ -41,17 +57,31 @@ def create_ice_servers() -> list[RTCIceServer]:
                 credential=credential,
             )
         )
+
     return servers
 
 
 def public_ice_config() -> dict:
+    """
+    Return ICE configuration safe for the frontend.
+    """
+
     servers = create_ice_servers()
+
     return {
         "iceServers": [
             {
                 "urls": server.urls,
-                **({"username": server.username} if server.username else {}),
-                **({"credential": server.credential} if server.credential else {}),
+                **(
+                    {"username": server.username}
+                    if server.username
+                    else {}
+                ),
+                **(
+                    {"credential": server.credential}
+                    if server.credential
+                    else {}
+                ),
             }
             for server in servers
         ]

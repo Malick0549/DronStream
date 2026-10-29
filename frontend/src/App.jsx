@@ -339,6 +339,21 @@ async function startPreview() {
   try {
     setPreviewStatus("connecting");
 
+    // Camera / local file: show local stream (no WebRTC preview needed)
+    const localStream = window.__droneAdminLocalStream;
+    if (localStream && videoRef.current) {
+      if (peerRef.current) {
+        peerRef.current.close();
+        peerRef.current = null;
+      }
+      videoRef.current.srcObject = localStream;
+      try {
+        await videoRef.current.play();
+      } catch (_) {}
+      setPreviewStatus("live");
+      return;
+    }
+
     const tokenResponse = await fetch(
       `${API_URL}/api/streams/preview-token`,
       {
@@ -611,6 +626,7 @@ const [telemetry, setTelemetry] = useState(null);
 const [dashboardRecording, setDashboardRecording] = useState(null);
 const [recordingActionLoading, setRecordingActionLoading] = useState(false);
 const [screenshotActionLoading, setScreenshotActionLoading] = useState(false);
+const [sourceType, setSourceType] = useState("test_video");
 
 // ----------------------------------------------------------
 // Get stream status
@@ -802,7 +818,7 @@ try {
 // Start stream
 // ----------------------------------------------------------
 
-async function startStream() {
+async function switchSource(source_type) {
 
 setLoading(true);
 setMessage("");
@@ -810,16 +826,155 @@ setMessage("");
 try {
 
   const response = await fetch(
-    `${API_URL}/api/streams/start`,
+    `${API_URL}/api/streams/switch-source`,
     {
       method: "POST",
       credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source_type }),
     }
   );
 
   const data = await response.json();
 
-  if (data.success) {
+  if (!response.ok || !data.success) {
+    throw new Error(data.message || "Unable to switch source.");
+  }
+
+  setMessage(`Source switched to ${source_type.replaceAll("_", " ")}.`);
+  getStreamStatus();
+  getTelemetry();
+
+} catch (error) {
+
+  setMessage(error.message || "Unable to switch source.");
+
+} finally {
+
+  setLoading(false);
+
+}
+
+}
+
+async function waitForIceGathering(pc) {
+  if (pc.iceGatheringState === "complete") return;
+  await new Promise((resolve) => {
+    const check = () => {
+      if (pc.iceGatheringState === "complete") {
+        pc.removeEventListener("icegatheringstatechange", check);
+        resolve();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", check);
+    setTimeout(resolve, 2500);
+  });
+}
+
+function pickVideoFile() {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "video/*";
+    input.onchange = () => {
+      const file = input.files && input.files[0];
+      if (file) resolve(file);
+      else reject(new Error("No video file selected."));
+    };
+    input.click();
+  });
+}
+
+// Keep local publisher alive while admin is live
+let adminPublishPeer = null;
+let adminPublishCapture = null;
+let adminPublishFileUrl = null;
+
+function stopAdminPublisher() {
+  try {
+    adminPublishPeer?.close();
+  } catch (_) {}
+  adminPublishPeer = null;
+  try {
+    adminPublishCapture?.getTracks?.().forEach((t) => t.stop());
+  } catch (_) {}
+  adminPublishCapture = null;
+  if (adminPublishFileUrl) {
+    try {
+      URL.revokeObjectURL(adminPublishFileUrl);
+    } catch (_) {}
+    adminPublishFileUrl = null;
+  }
+}
+
+// ----------------------------------------------------------
+// Start stream
+// ----------------------------------------------------------
+
+async function waitForIceGathering(pc) {
+  if (pc.iceGatheringState === "complete") return;
+  await new Promise((resolve) => {
+    const check = () => {
+      if (pc.iceGatheringState === "complete") {
+        pc.removeEventListener("icegatheringstatechange", check);
+        resolve();
+      }
+    };
+    pc.addEventListener("icegatheringstatechange", check);
+    setTimeout(resolve, 2500);
+  });
+}
+
+function pickVideoFile() {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "video/*";
+    input.onchange = () => {
+      const file = input.files && input.files[0];
+      if (file) resolve(file);
+      else reject(new Error("No video file selected."));
+    };
+    input.click();
+  });
+}
+
+function stopAdminPublisher() {
+  try {
+    window.__droneAdminPublishPeer?.close();
+  } catch (_) {}
+  window.__droneAdminPublishPeer = null;
+  try {
+    window.__droneAdminCapture?.getTracks?.().forEach((t) => t.stop());
+  } catch (_) {}
+  window.__droneAdminCapture = null;
+  if (window.__droneAdminFileUrl) {
+    try {
+      URL.revokeObjectURL(window.__droneAdminFileUrl);
+    } catch (_) {}
+    window.__droneAdminFileUrl = null;
+  }
+  window.__droneAdminLocalStream = null;
+}
+
+async function startStream() {
+  setLoading(true);
+  setMessage("");
+
+  try {
+    const response = await fetch(`${API_URL}/api/streams/start`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source_type: sourceType }),
+    });
+
+    const data = await response.json();
+
+    if (!data.success) {
+      setMessage(data.message || "Failed to start stream.");
+      return;
+    }
 
     setStream({
       ...(data.stream || {}),
@@ -830,34 +985,100 @@ try {
       setDashboardRecording(data.recording);
     }
 
-    setMessage(
-      "Stream is now live."
-    );
+    if (data.source?.requires_browser_media) {
+      const mode = String(data.source.type || "").toLowerCase();
+      stopAdminPublisher();
+
+      let capture;
+      if (mode === "browser_file") {
+        const file = await pickVideoFile();
+        const video = document.createElement("video");
+        window.__droneAdminFileUrl = URL.createObjectURL(file);
+        video.src = window.__droneAdminFileUrl;
+        video.muted = true;
+        video.playsInline = true;
+        video.loop = true;
+        await new Promise((resolve, reject) => {
+          video.onloadeddata = resolve;
+          video.onerror = () =>
+            reject(new Error("Could not read the selected video file."));
+        });
+        await video.play();
+        capture = video.captureStream(30);
+      } else {
+        capture = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30, max: 30 },
+          },
+        });
+      }
+
+      window.__droneAdminCapture = capture;
+      window.__droneAdminLocalStream = capture;
+
+      const iceRes = await fetch(`${API_URL}/api/webrtc/ice-config`, {
+        credentials: "include",
+      });
+      const iceConfig = iceRes.ok ? await iceRes.json() : { iceServers: [] };
+
+      const peer = new RTCPeerConnection({
+        iceServers: iceConfig.iceServers || [],
+      });
+      window.__droneAdminPublishPeer = peer;
+      capture.getTracks().forEach((track) => peer.addTrack(track, capture));
+
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      await waitForIceGathering(peer);
+
+      const pubRes = await fetch(`${API_URL}/api/webrtc/admin/publish-offer`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stream_id: data.stream?.id,
+          sdp: peer.localDescription.sdp,
+          type: peer.localDescription.type,
+        }),
+      });
+      const answer = await pubRes.json().catch(() => ({}));
+      if (!pubRes.ok || !answer.sdp) {
+        stopAdminPublisher();
+        throw new Error(
+          answer.detail || answer.message || "Browser publish failed."
+        );
+      }
+      await peer.setRemoteDescription({
+        type: answer.type || "answer",
+        sdp: answer.sdp,
+      });
+
+      setStream((prev) => ({
+        ...(prev || {}),
+        id: data.stream?.id,
+        status: "live",
+      }));
+      setMessage(
+        mode === "browser_file"
+          ? "Live from video file on this PC."
+          : "Live from machine camera."
+      );
+    } else {
+      stopAdminPublisher();
+      setMessage("Stream is now live.");
+    }
 
     getStreamStatus();
     getTelemetry();
-
-  } else {
-
-    setMessage(
-      data.message ||
-      "Failed to start stream."
-    );
-
+  } catch (err) {
+    stopAdminPublisher();
+    setMessage(err.message || "Failed to start stream.");
+  } finally {
+    setLoading(false);
   }
-
-} catch {
-
-  setMessage(
-    "Failed to start stream."
-  );
-
-} finally {
-
-  setLoading(false);
-
-}
-
 }
 
 // ----------------------------------------------------------
@@ -868,6 +1089,7 @@ async function stopStream() {
 
 setLoading(true);
 setMessage("");
+stopAdminPublisher();
 
 try {
 
@@ -4223,6 +4445,7 @@ const [loading, setLoading] = useState(false);
 const [saving, setSaving] = useState(false);
 const [message, setMessage] = useState("");
 const [error, setError] = useState("");
+const [sourceType, setSourceType] = useState("capture_card");
 
 const [settings, setSettings] = useState({
   default_viewer_can_record: false,
@@ -4232,6 +4455,7 @@ const [settings, setSettings] = useState({
   max_viewer_sessions: 50,
   session_timeout_minutes: 20,
   use_capture_card: false,
+  stream_input_mode: "test_video",
   capture_device_name: "USB Video",
 });
 
@@ -4258,7 +4482,7 @@ async function getSettings() {
   try {
     const response = await fetch(
       `${API_URL}/api/admin/settings`,
-      { credentials: "include" }
+      { credentials: "include", cache: "no-store" }
     );
     if (response.ok) {
       const data = await response.json();
@@ -4285,7 +4509,14 @@ async function saveSettings(e) {
         method: "PUT",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(settings),
+        body: JSON.stringify({
+          ...settings,
+          stream_input_mode:
+            settings.stream_input_mode || "test_video",
+          use_capture_card:
+            (settings.stream_input_mode || "test_video") ===
+            "capture_card",
+        }),
       }
     );
     const data = await response.json().catch(() => ({}));
@@ -4457,22 +4688,26 @@ return (
               <h2>Input device</h2>
             </div>
             <div className="settings-grid">
-              <label className="settings-toggle">
-                <input
-                  type="checkbox"
-                  checked={!!settings.use_capture_card}
-                  onChange={(e) =>
-                    updateSetting("use_capture_card", e.target.checked)
-                  }
-                />
-                <span>
-                  <strong>Use capture card</strong>
+                <label className="settings-field">
+                  <span>Live input source</span>
+                  <select
+                    value={settings.stream_input_mode || "test_video"}
+                    onChange={(e) => {
+                      const mode = e.target.value;
+                      updateSetting("stream_input_mode", mode);
+                      updateSetting("use_capture_card", mode === "capture_card");
+                    }}
+                  >
+                    <option value="test_video">Test video (server file)</option>
+                    <option value="capture_card">Capture card (FFmpeg)</option>
+                    <option value="browser_camera">Machine camera (this PC)</option>
+                    <option value="browser_file">Video file (this PC)</option>
+                  </select>
                   <small>
-                    Off = test video file. On = Windows capture device.
-                    Stop and start the stream after changing.
+                    Camera and video file use this browser. Capture card and test
+                    video use the server.
                   </small>
-                </span>
-              </label>
+                </label>
 
               <label className="settings-field">
                 <span>Capture device</span>

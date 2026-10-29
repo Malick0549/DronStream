@@ -53,6 +53,8 @@ export default function BroadcasterPage() {
   const [isRecording, setIsRecording] = useState(false);
   const [devices, setDevices] = useState([]);
   const [deviceId, setDeviceId] = useState("");
+  const [sourceMode, setSourceMode] = useState("camera");
+  const [videoFile, setVideoFile] = useState(null);
   const [isStarting, setIsStarting] = useState(false);
   const [isLive, setIsLive] = useState(false);
   const [message, setMessage] = useState("");
@@ -215,22 +217,47 @@ export default function BroadcasterPage() {
 
   async function startBroadcast() {
     if (!selectedStream) return;
+    if (!account.permissions.can_publish_browser) {
+      setError("Browser video publishing requires an administrator grant.");
+      return;
+    }
     setIsStarting(true);
     setError("");
     setMessage("");
     let capture;
     let peer;
+    let fileUrl;
     try {
-      await requestJson(`/api/accounts/streams/${encodeURIComponent(selectedStream)}/start`, { method: "POST" });
-      capture = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30, max: 30 },
-        },
+      await requestJson(`/api/accounts/streams/${encodeURIComponent(selectedStream)}/start`, {
+        method: "POST",
+        body: JSON.stringify({ source_type: "browser" }),
       });
+
+      if (sourceMode === "file") {
+        if (!videoFile) throw new Error("Choose a video file first.");
+        const video = document.createElement("video");
+        fileUrl = URL.createObjectURL(videoFile);
+        video.src = fileUrl;
+        video.muted = true;
+        video.playsInline = true;
+        await new Promise((resolve, reject) => {
+          video.onloadeddata = resolve;
+          video.onerror = () => reject(new Error("The selected video could not be read."));
+        });
+        video.currentTime = 0;
+        await video.play();
+        capture = video.captureStream(30);
+      } else {
+        capture = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            frameRate: { ideal: 30, max: 30 },
+          },
+        });
+      }
       captureRef.current = capture;
       if (previewRef.current) {
         previewRef.current.srcObject = capture;
@@ -271,6 +298,7 @@ export default function BroadcasterPage() {
       capture?.getTracks().forEach((track) => track.stop());
       if (captureRef.current === capture) captureRef.current = null;
       if (previewRef.current) previewRef.current.srcObject = null;
+      if (fileUrl) URL.revokeObjectURL(fileUrl);
       await requestJson(`/api/accounts/streams/${encodeURIComponent(selectedStream)}/stop`, { method: "POST" }).catch(() => {});
       setError(err.message);
       setIsStarting(false);
@@ -353,13 +381,18 @@ export default function BroadcasterPage() {
               <option value="">Choose a stream</option>
               {streams.map((stream) => <option key={stream.id} value={stream.id}>{stream.id.slice(0, 14)} · {stream.status}</option>)}
             </select></label>
-            <label>Video source<select value={deviceId} onChange={(event) => setDeviceId(event.target.value)} disabled={isLive || isStarting}>
+            <label>Source mode<select value={sourceMode} onChange={(event) => setSourceMode(event.target.value)} disabled={isLive || isStarting}>
+              <option value="camera">Machine camera</option>
+              <option value="file">Video file from this device</option>
+            </select></label>
+            {sourceMode === "camera" && <label>Camera or capture card<select value={deviceId} onChange={(event) => setDeviceId(event.target.value)} disabled={isLive || isStarting}>
               <option value="">Default camera or capture card</option>
               {devices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Video input ${index + 1}`}</option>)}
-            </select></label>
+            </select></label>}
+            {sourceMode === "file" && <label>Video file<input type="file" accept="video/*" onChange={(event) => setVideoFile(event.target.files?.[0] || null)} disabled={isLive || isStarting} /></label>}
             <div className="broadcaster-actions">
               <button className="broadcaster-secondary" onClick={createStream} disabled={isLive || isStarting || !account.permissions.can_start_streams}>New stream</button>
-              {!isLive ? <button className="broadcaster-primary" onClick={startBroadcast} disabled={!selectedStream || isStarting || !account.permissions.can_start_streams}>{isStarting ? "Connecting…" : "Go live"}</button> : <button className="broadcaster-stop" onClick={stopBroadcast}>Stop broadcast</button>}
+              {!isLive ? <button className="broadcaster-primary" onClick={startBroadcast} disabled={!selectedStream || isStarting || !account.permissions.can_start_streams || (sourceMode === "file" && !videoFile)}>{isStarting ? "Connecting…" : "Go live"}</button> : <button className="broadcaster-stop" onClick={stopBroadcast}>Stop broadcast</button>}
             </div>
             {isLive && (account.permissions.can_record || account.permissions.can_screenshot) && <div className="broadcaster-actions">
               {account.permissions.can_record && <button className={isRecording ? "broadcaster-stop" : "broadcaster-secondary"} onClick={toggleRecording}>{isRecording ? "Stop recording" : "Record"}</button>}
