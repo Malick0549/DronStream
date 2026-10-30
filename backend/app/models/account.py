@@ -20,6 +20,9 @@ class BroadcasterAccount(Base):
     can_record: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     can_screenshot: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     can_manage_viewers: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    can_publish_browser: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, nullable=False
     )
