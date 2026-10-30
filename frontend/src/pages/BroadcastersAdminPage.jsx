@@ -8,6 +8,7 @@ const PERMISSIONS = [
   ["can_manage_viewers", "Manage viewers"],
   ["can_record", "Record"],
   ["can_screenshot", "Screenshots"],
+  ["can_publish_browser", "Browser publishing"],
 ];
 
 async function requestJson(path, options = {}) {
