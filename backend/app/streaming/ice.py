@@ -1,37 +1,15 @@
-import base64
-import hashlib
-import hmac
-import time
 
 from aiortc import RTCIceServer
 
 from backend.app.config import settings
 
 
-def _turn_credentials() -> tuple[str, str] | None:
-    if not settings.turn_urls or not settings.turn_shared_secret:
-        return None
-
-    expires_at = int(time.time()) + settings.turn_credential_ttl_seconds
-
-    username = f"{expires_at}:dronestream"
-
-    digest = hmac.new(
-        settings.turn_shared_secret.encode("utf-8"),
-        username.encode("utf-8"),
-        hashlib.sha1,
-    ).digest()
-
-    credential = base64.b64encode(digest).decode("ascii")
-
-    return username, credential
-
-
 def create_ice_servers() -> list[RTCIceServer]:
     """
-    Return the ICE servers used by aiortc.
-    When FORCE_LOOPBACK is on, return no STUN/TURN so local 127.0.0.1 only.
+    Return the ICE servers used by DroneStream.
+    Loopback mode disables external STUN and TURN servers.
     """
+
     import os
 
     force_loopback = os.environ.get(
@@ -47,14 +25,16 @@ def create_ice_servers() -> list[RTCIceServer]:
         RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
     ]
 
-    credentials = _turn_credentials()
-    if credentials is not None:
-        username, credential = credentials
+    if (
+        settings.turn_urls
+        and settings.turn_username
+        and settings.turn_password
+    ):
         servers.append(
             RTCIceServer(
                 urls=settings.turn_urls,
-                username=username,
-                credential=credential,
+                username=settings.turn_username,
+                credential=settings.turn_password,
             )
         )
 
@@ -63,7 +43,8 @@ def create_ice_servers() -> list[RTCIceServer]:
 
 def public_ice_config() -> dict:
     """
-    Return ICE configuration safe for the frontend.
+    Return ICE configuration for the authorized frontend.
+    TURN credentials are required by WebRTC clients to connect.
     """
 
     servers = create_ice_servers()

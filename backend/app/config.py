@@ -27,10 +27,12 @@ class Settings(BaseSettings):
     # --- Environment ---
     environment: str = "development"
     force_loopback: bool = True
-    turn_urls: list[str] = Field(default_factory=list)
-    turn_shared_secret: str = ""
-    turn_credential_ttl_seconds: int = 3600
 
+    # Metered TURN configuration
+    turn_urls: list[str] = Field(default_factory=list)
+    turn_username: str = ""
+    turn_password: str = ""
+    
     # --- CORS ---
     cors_origins: list[str] = [
         "http://localhost:5173",
