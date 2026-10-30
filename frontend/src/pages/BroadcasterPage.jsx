@@ -2,22 +2,44 @@ import { useEffect, useRef, useState } from "react";
 import "./BroadcasterPage.css";
 
 const API_URL = "";
-function waitForIceGathering(peer) {
-  if (peer.iceGatheringState === "complete") return Promise.resolve();
 
+function waitForIceGathering(peer) {
   return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
+    let finished = false;
+
+    const cleanup = () => {
+      window.clearTimeout(timeout);
       peer.removeEventListener("icegatheringstatechange", onChange);
-      reject(new Error("ICE gathering timed out. Check the network and TURN configuration."));
-    }, 15000);
+    };
+
+    const finish = (callback, value) => {
+      if (finished) return;
+
+      finished = true;
+      cleanup();
+      callback(value);
+    };
+
     const onChange = () => {
       if (peer.iceGatheringState === "complete") {
-        window.clearTimeout(timeout);
-        peer.removeEventListener("icegatheringstatechange", onChange);
-        resolve();
+        finish(resolve);
       }
     };
+
+    const timeout = window.setTimeout(() => {
+      finish(
+        reject,
+        new Error(
+          `ICE gathering timed out after 30 seconds. Current state: ${peer.iceGatheringState}. Check browser TURN configuration and network connectivity.`
+        )
+      );
+    }, 30000);
+
+    // Register the listener before checking the state.
     peer.addEventListener("icegatheringstatechange", onChange);
+
+    // Check again to avoid missing an event that occurred during setup.
+    onChange();
   });
 }
 
