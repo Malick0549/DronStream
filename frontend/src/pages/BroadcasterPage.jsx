@@ -27,13 +27,20 @@ function waitForIceGathering(peer) {
     };
 
     const timeout = window.setTimeout(() => {
-      finish(
-        reject,
-        new Error(
-          `ICE gathering timed out after 30 seconds. Current state: ${peer.iceGatheringState}. Check browser TURN configuration and network connectivity.`
-        )
-      );
-    }, 30000);
+      // A slow or unreachable STUN/TURN server can keep gathering open.
+      // Send the candidates collected so far instead of failing.
+      const sdp = peer.localDescription?.sdp || "";
+      if (sdp.includes("a=candidate")) {
+        finish(resolve);
+      } else {
+        finish(
+          reject,
+          new Error(
+            `ICE gathering found no candidates after 5 seconds. Current state: ${peer.iceGatheringState}. Check network connectivity.`
+          )
+        );
+      }
+    }, 5000);
 
     // Register the listener before checking the state.
     peer.addEventListener("icegatheringstatechange", onChange);
