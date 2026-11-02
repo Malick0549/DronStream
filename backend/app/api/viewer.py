@@ -367,7 +367,12 @@ async def viewer_session_status(session_id: str):
                 "message": "Session not found.",
             }
 
-        if viewer_session.status != "watching":
+        if viewer_session.status == "timeout":
+            # The page is alive and checking in again: bring the session back.
+            viewer_session.status = "watching"
+            viewer_session.disconnected_at = None
+            await session.commit()
+        elif viewer_session.status != "watching":
             return {
                 "success": True,
                 "authorized": False,

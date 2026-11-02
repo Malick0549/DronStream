@@ -98,7 +98,44 @@ if (-not $apiReady -or -not $webReady) {
     throw "DroneStream did not become ready. Check the API and frontend PowerShell windows for errors."
 }
 
-Start-Process "http://localhost:5173/"
+# --- Public tunnel (Cloudflare quick tunnel) ---
+$tunnelUrl = $null
+$cloudflaredPath = $null
+$cloudflaredCommand = Get-Command cloudflared.exe -ErrorAction SilentlyContinue
+if ($cloudflaredCommand) {
+    $cloudflaredPath = $cloudflaredCommand.Source
+} elseif (Test-Path "C:\Program Files (x86)\cloudflared\cloudflared.exe") {
+    $cloudflaredPath = "C:\Program Files (x86)\cloudflared\cloudflared.exe"
+}
+
+if ($cloudflaredPath) {
+    $tunnelLog = Join-Path $env:TEMP "dronestream-tunnel.log"
+    Remove-Item -LiteralPath $tunnelLog -ErrorAction SilentlyContinue
+    $quotedCloudflared = $cloudflaredPath.Replace("'", "''")
+    $quotedLog = $tunnelLog.Replace("'", "''")
+    $tunnelCommand = "& '$quotedCloudflared' tunnel --url http://localhost:5173 2>&1 | ForEach-Object { `$_.ToString() } | Tee-Object -FilePath '$quotedLog'"
+
+    Start-Process powershell.exe -ArgumentList @("-NoExit", "-NoProfile", "-Command", $tunnelCommand)
+
+    $tunnelDeadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $tunnelDeadline -and -not $tunnelUrl) {
+        Start-Sleep -Seconds 1
+        try { $tunnelText = Get-Content -LiteralPath $tunnelLog -Raw -ErrorAction Stop } catch { $tunnelText = "" }
+        $tunnelMatch = [regex]::Matches($tunnelText, 'https://[a-z0-9-]+\.trycloudflare\.com') |
+            Where-Object { $_.Value -ne "https://api.trycloudflare.com" } |
+            Select-Object -First 1
+        if ($tunnelMatch) { $tunnelUrl = $tunnelMatch.Value }
+    }
+}
+
+if ($tunnelUrl) {
+    Start-Process $tunnelUrl
+    Write-Host "Public address: $tunnelUrl"
+    Write-Host "Create viewer links from THIS address, not from localhost."
+} else {
+    Start-Process "http://localhost:5173/"
+    Write-Host "Tunnel not started. Opened localhost only (links will not work on other devices)."
+}
 Write-Host "DroneStream is ready at http://localhost:5173/"
 Write-Host "Broadcaster page: http://localhost:5173/broadcast"
 if ($firstRunSetup) {
