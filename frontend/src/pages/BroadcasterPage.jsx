@@ -137,11 +137,32 @@ export default function BroadcasterPage() {
   }, []);
 
   async function refreshDevices() {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      throw new Error("This browser does not support video input devices.");
+    }
+
     const devices = await navigator.mediaDevices.enumerateDevices();
     const cameras = devices.filter((device) => device.kind === "videoinput");
     setDevices(cameras);
-    if (!deviceId && cameras[0]) setDeviceId(cameras[0].deviceId);
+    setDeviceId((current) =>
+      cameras.some((device) => device.deviceId === current)
+        ? current
+        : cameras[0]?.deviceId || ""
+    );
   }
+
+  useEffect(() => {
+    const mediaDevices = navigator.mediaDevices;
+    if (!mediaDevices?.addEventListener) return undefined;
+
+    const handleDeviceChange = () => {
+      refreshDevices().catch((err) => setError(err.message));
+    };
+
+    mediaDevices.addEventListener("devicechange", handleDeviceChange);
+    return () =>
+      mediaDevices.removeEventListener("devicechange", handleDeviceChange);
+  }, []);
 
   async function authenticate(event) {
     event.preventDefault();
@@ -414,10 +435,21 @@ export default function BroadcasterPage() {
               <option value="camera">Machine camera</option>
               <option value="file">Video file from this device</option>
             </select></label>
-            {sourceMode === "camera" && <label>Camera or capture card<select value={deviceId} onChange={(event) => setDeviceId(event.target.value)} disabled={isLive || isStarting}>
-              <option value="">Default camera or capture card</option>
-              {devices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Video input ${index + 1}`}</option>)}
-            </select></label>}
+            {sourceMode === "camera" && <div className="broadcaster-source-picker">
+              <label>Camera or capture card<select value={deviceId} onChange={(event) => setDeviceId(event.target.value)} disabled={isLive || isStarting}>
+                <option value="">Default camera or capture card</option>
+                {devices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Video input ${index + 1}`}</option>)}
+              </select></label>
+              <button
+                type="button"
+                className="broadcaster-secondary"
+                onClick={() => refreshDevices().catch((err) => setError(err.message))}
+                disabled={isLive || isStarting}
+                aria-label="Refresh camera and capture card list"
+              >
+                Refresh
+              </button>
+            </div>}
             {sourceMode === "file" && <label>Video file<input type="file" accept="video/*" onChange={(event) => setVideoFile(event.target.files?.[0] || null)} disabled={isLive || isStarting} /></label>}
             <div className="broadcaster-actions">
               <button className="broadcaster-secondary" onClick={createStream} disabled={isLive || isStarting || !account.permissions.can_start_streams}>New stream</button>

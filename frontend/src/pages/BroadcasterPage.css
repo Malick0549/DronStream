@@ -138,6 +138,23 @@
   font-weight: 600;
 }
 
+.broadcaster-source-picker {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+
+.broadcaster-source-picker label {
+  flex: 1;
+  min-width: 0;
+}
+
+.broadcaster-source-picker button {
+  flex: 0 0 auto;
+  min-height: 42px;
+  padding: 0 10px;
+}
+
 .broadcaster-controls select,
 .broadcaster-form input {
   width: 100%;
