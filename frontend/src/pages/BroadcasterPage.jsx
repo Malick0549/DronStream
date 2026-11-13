@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import "./BroadcasterPage.css";
+import { startRelayPublish } from "../relay.js";
 
 const API_URL = "";
 
@@ -68,6 +69,7 @@ export default function BroadcasterPage() {
   const previewRef = useRef(null);
   const peerRef = useRef(null);
   const captureRef = useRef(null);
+  const relayStopRef = useRef(null);
   const [account, setAccount] = useState(null);
   const [checking, setChecking] = useState(true);
   const [mode, setMode] = useState(new URLSearchParams(window.location.search).has("invite") ? "register" : "login");
@@ -342,6 +344,12 @@ export default function BroadcasterPage() {
         }),
       });
       await peer.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
+      relayStopRef.current?.();
+      relayStopRef.current = startRelayPublish(
+        capture,
+        selectedStream,
+        (status) => console.log("DroneStream relay:", status)
+      );
     } catch (err) {
       peer?.close();
       if (peerRef.current === peer) peerRef.current = null;
@@ -358,6 +366,8 @@ export default function BroadcasterPage() {
   async function stopBroadcast() {
     const peer = peerRef.current;
     peerRef.current = null;
+    relayStopRef.current?.();
+    relayStopRef.current = null;
     peer?.close();
     const capture = captureRef.current;
     captureRef.current = null;

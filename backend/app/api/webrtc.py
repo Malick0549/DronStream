@@ -225,7 +225,7 @@ async def create_broadcast_connection(
                 from backend.app.api.streams import update_stream_state, get_active_viewer_count
 
                 async with AsyncSessionLocal() as session2:
-                    current2 = await session2.get(Stream, stream_db_id)
+                    current2 = await session2.get(Stream, stream.id)
                     if current2 is not None:
                         link_result = await session2.execute(
                             select(StreamLink)

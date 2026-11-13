@@ -3,6 +3,7 @@ import BroadcasterPage from "./pages/BroadcasterPage";
 import BroadcastersAdminPage from "./pages/BroadcastersAdminPage";
 import React from "react";
 import { useEffect, useState } from "react";
+import { startRelayWatch } from "./relay.js";
 
 const API_URL = "";
 
@@ -5325,6 +5326,7 @@ React.useEffect(() => {
 React.useEffect(() => {
 
 let peerConnection = null;
+let relayStop = null;
 let cancelled = false;
 
 let viewerSessionId = null;
@@ -5524,6 +5526,27 @@ async function connectToStream() {
     setStreamInfo(
       accessData.stream
     );
+
+    if (new URLSearchParams(window.location.search).get("webrtc") !== "1") {      relayStop = startRelayWatch(
+        videoRef.current,
+        token,
+        accessData.session_id,
+        (event, code) => {
+          if (cancelled) return;
+          if (event === "playing") {
+            setConnected(true);
+            setLoading(false);
+          } else if (event === "closed" && code === 4410) {
+            setError("The broadcast has ended.");
+          } else if (event === "closed" && code === 4403) {
+            setError("Your access to this stream has ended.");
+          } else if (event === "unsupported") {
+            setError("This browser cannot play the relay stream.");
+          }
+        }
+      );
+      return;
+    }
 
 
     // ----------------------------------------------------
@@ -5799,6 +5822,7 @@ connectToStream();
 
 return () => {
   cancelled = true;
+  if (relayStop) relayStop();
   disconnectViewerSession();
   if (peerConnection) {
     peerConnection.close();
