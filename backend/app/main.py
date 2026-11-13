@@ -18,6 +18,7 @@ from backend.app.api.webrtc import router as webrtc_router
 from backend.app.api.auth import router as auth_router
 from backend.app.api.accounts import router as accounts_router
 from backend.app.api.accounts import admin_router as broadcaster_admin_router
+from backend.app.api.relay import router as relay_router
 from backend.app.config import settings
 from sqlalchemy import text
 from backend.app.database import AsyncSessionLocal
@@ -43,6 +44,7 @@ app.include_router(webrtc_router)
 app.include_router(auth_router)
 app.include_router(accounts_router)
 app.include_router(broadcaster_admin_router)
+app.include_router(relay_router)
 
 
 @app.get("/")
